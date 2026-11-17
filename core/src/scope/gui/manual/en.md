@@ -97,6 +97,12 @@ The switcher sits under the SCOPE title in the left bar.
 - Choose a workspace in the list to switch. Everything is saved as you work, so nothing is lost by switching or by closing the window, which reopens on the workspace shown last.
 - **⋯** renames or deletes the workspace shown. Deleting removes only the workspace from this window: its environment, systems, input files, runs and everything on the cluster stay as they are. The last workspace cannot be deleted.
 
+### Export, import and shared folders
+
+- **⋯ › Export this workspace…** writes a small file with the workspace (its paths, input list and cluster project) and the connection of its profile. No project file is copied and no password exists to be copied.
+- **⋯ › Import a workspace…** reads such a file, for instance on another computer. A workspace name already in use gets *(2)*; a different saved connection with the same name is never replaced (the imported one gets a new name). Paths that do not exist on this computer are listed, so you can open the environment and inputs from where they are.
+- If two workspaces use the same project folder on the same cluster, the Cluster page says so. It is allowed, but do not run the same system from both.
+
 ### Runs and workspaces
 
 Runs do not belong to the window, so they keep going whichever workspace is shown. When you come back to a workspace, its run is shown again, or how it ended. On the Cluster page, **Watch runs** finds a run of that workspace's project again.
@@ -104,6 +110,15 @@ Runs do not belong to the window, so they keep going whichever workspace is show
 > **Warning.** Two workspaces can point to the same environment. The Run page then refuses to start a system that is already running from that environment, from any workspace or window, because two runs of one system overwrite each other's results.
 
 > **Note.** The first time this version starts, it makes a workspace called *Default* from what the window remembered before: the last environment and, if there was exactly one cluster profile, its project folder. Runs started with an older version are shown there.
+
+## Runs
+
+The **Runs** page (left bar) lists every run of every workspace in one table: the workspace, the system, where it runs, its state and its log.
+
+- Runs on this computer are refreshed every few seconds while the page is shown.
+- **Check the clusters** asks every cluster project of your workspaces which runs are active. It only reads, and it is the only moment this page contacts a cluster.
+- **Show** (or a double-click) switches to the run's workspace and follows the run: on the Run page for this computer, on the Cluster page for a cluster.
+- **Stop the run** stops the selected run, here or on its cluster. Jobs already submitted to a scheduler are not cancelled.
 
 ## How SCOPE thinks
 
@@ -297,11 +312,35 @@ The lights are a snapshot: they change only when you press **Test connection** a
 | **Watch runs** | Finds a run that is active on the cluster, for example one started before the window was closed, and follows its log. After a passed connection test, the window also tells you if a run is active. |
 | **Stop watching** | Stops following. The run goes on. |
 | **Stop the run** | Asks the cluster to end the run (the whole run, not only its launcher). Jobs already submitted are not cancelled. |
-| **Preview download** and **Download** | Bring results back. Large files (wavefunctions, scratch, checkpoints) are skipped by default. |
+| **Download results…** | Lists the results of the selected system on the cluster and lets you choose what to bring back (see *Download results*). |
 
 A run started from here is detached: it has its own process and log on the cluster (in `<project>/logs/`), so it keeps going if you close the window, if the window crashes, or if the connection drops. Jobs already handed to the scheduler are never affected by the window. A second run of the same system is refused while one is active.
 
-> **Warning.** A download can replace the local system file. Look at the preview first.
+### Download results
+
+**Download results…** brings the results of a cluster run back into the folders of the workspace shown: the files go to `<Computations>/<system>/`, exactly as they are under `<project>/Computations/<system>/` on the cluster. When a cluster run finishes, the window reminds you of this button.
+
+1. The window lists the cluster folder of the system (read-only) and compares each file with the copy here.
+2. It ticks what is **new** or **changed** on the cluster. Heavy working files (wavefunctions, scratch, checkpoints) and files larger than the **size limit** (200 MB unless you change it) are listed but left unticked, so a file of several GB is never copied by accident.
+3. Tick or untick freely. **Show only…** filters the list (`*.log`, or a part of a name); **Tick all shown** works on what the filter shows.
+4. The line under the table gives how much is ticked, and refuses the download if this computer does not have the space.
+5. Press **Download**.
+
+| Status | Meaning | Proposed |
+|---|---|---|
+| new | Not here yet | Yes, unless heavy or over the limit |
+| changed | Different here, and the cluster's copy is newer | Yes, unless heavy or over the limit |
+| same | Same size and date | No |
+| newer here | Different here, and the local copy is newer | No: it is never replaced unless you tick it |
+
+What makes it safe:
+
+- Files are written only inside this workspace's folders; names that would point elsewhere are refused, and links on the cluster are not followed.
+- Nothing local is ever deleted.
+- An interrupted download resumes where it stopped when you press **Download** again, and each file is replaced only once it is complete.
+- The **system file** (the record of everything SCOPE registered) is proposed when the cluster's is newer. It is first copied next to the local one, and only a complete copy replaces it; the previous file is kept as `<system>.npy.bak-<date>`.
+
+> **Tip.** For very large transfers, **Copy command line** puts the equivalent `rsync` command on the clipboard. Paste it in a Terminal (inside `screen` or `tmux` if you like); it reads the ticked names from a list file and can be run again to resume. The system file is not part of it: replace that from the window, which keeps a backup.
 
 # Reference
 

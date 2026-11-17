@@ -462,6 +462,10 @@ class MainWindow(QMainWindow):
         for page in self.pages: self.tabs.addWidget(page)
         manual_page = QWidget(); ml = QVBoxLayout(manual_page); ml.setContentsMargins(26, 20, 26, 16); title = QLabel("Manual"); title.setObjectName("pagetitle"); ml.addWidget(title); ml.addWidget(self.manual, 1)
         self.tabs.addWidget(manual_page)
+        from scope.gui.runs_page import RunsPage
+        self.runs_page = RunsPage(self); runs_wrap = QWidget(); rl_ = QVBoxLayout(runs_wrap); rl_.setContentsMargins(26, 20, 26, 16); runs_title = QLabel("Runs"); runs_title.setObjectName("pagetitle")
+        runs_sub = QLabel("Every run of every workspace, on this computer and on the clusters. Double-click a run to show it in its workspace."); runs_sub.setObjectName("pagesub"); runs_sub.setWordWrap(True)
+        rl_.addWidget(runs_title); rl_.addWidget(runs_sub); rl_.addWidget(self.runs_page, 1); self.tabs.addWidget(runs_wrap)                 ## index len(STEPS) + 1 (the manual stays at len(STEPS))
 
         side = QFrame(); side.setObjectName("sidebar"); side.setFixedWidth(240); sl = QVBoxLayout(side); sl.setContentsMargins(0, 18, 0, 14); sl.setSpacing(2)
         brand = QLabel("SCOPE"); brand.setObjectName("brand"); brandsub = QLabel("workflow assistant"); brandsub.setObjectName("brandsub")
@@ -472,12 +476,15 @@ class MainWindow(QMainWindow):
         self.ws_combo.setMinimumContentsLength(8); self.ws_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
         self.ws_new_btn = QPushButton("+"); self.ws_new_btn.setObjectName("wsbtn"); self.ws_new_btn.setFixedWidth(28); self.ws_new_btn.setToolTip("New workspace"); self.ws_new_btn.clicked.connect(self.new_workspace)
         self.ws_menu_btn = QPushButton("⋯"); self.ws_menu_btn.setObjectName("wsbtn"); self.ws_menu_btn.setFixedWidth(28); self.ws_menu_btn.setToolTip("Rename or delete this workspace")
-        ws_menu = QMenu(self); ws_menu.addAction("Rename this workspace…", self.rename_workspace); ws_menu.addAction("Delete this workspace…", self.delete_workspace); self.ws_menu_btn.setMenu(ws_menu)
+        ws_menu = QMenu(self); ws_menu.addAction("Rename this workspace…", self.rename_workspace); ws_menu.addAction("Delete this workspace…", self.delete_workspace); ws_menu.addSeparator()
+        ws_menu.addAction("Export this workspace…", self.export_workspace); ws_menu.addAction("Import a workspace…", self.import_workspace); self.ws_menu_btn.setMenu(ws_menu)
         wl = QVBoxLayout(); wl.setContentsMargins(14, 0, 14, 12); wl.setSpacing(4); wl.addWidget(ws_label); wr = QHBoxLayout(); wr.setSpacing(4); wr.addWidget(self.ws_combo, 1); wr.addWidget(self.ws_new_btn); wr.addWidget(self.ws_menu_btn); wl.addLayout(wr); sl.addLayout(wl)
         self.group, self.step_buttons = QButtonGroup(self), []
         for i, (key, title, _, _) in enumerate(STEPS):
             b = QPushButton(); b.setObjectName("step"); b.setCheckable(True); b.setCursor(Qt.PointingHandCursor); b.clicked.connect(lambda _=False, i=i: self.go(i)); self.group.addButton(b, i); self.step_buttons.append(b); sl.addWidget(b)
         sl.addSpacing(10)
+        self.runs_btn = QPushButton("▶   Runs"); self.runs_btn.setObjectName("step"); self.runs_btn.setCheckable(True); self.runs_btn.setCursor(Qt.PointingHandCursor); self.runs_btn.setToolTip("Every run of every workspace, here and on the clusters")
+        self.runs_btn.clicked.connect(lambda: self.go(len(STEPS) + 1)); self.group.addButton(self.runs_btn, len(STEPS) + 1); sl.addWidget(self.runs_btn)
         self.manual_btn = QPushButton("?   Manual"); self.manual_btn.setObjectName("step"); self.manual_btn.setCheckable(True); self.manual_btn.setCursor(Qt.PointingHandCursor); self.manual_btn.clicked.connect(lambda: self.open_manual()); self.group.addButton(self.manual_btn, len(STEPS)); sl.addWidget(self.manual_btn)
         sl.addStretch(1)
         self.badge = QLabel(); self.badge.setObjectName("badge"); self.badge.setWordWrap(True); bw = QHBoxLayout(); bw.setContentsMargins(14, 0, 14, 0); bw.addWidget(self.badge); sl.addLayout(bw)
@@ -585,7 +592,7 @@ class MainWindow(QMainWindow):
             root, env = workspaces.remote_fields(ws, self.remote_tab.profiles.get(ws.profile))
             self.remote_tab.set_project(root, env, workspaces.suggested_remote_root(ws))
             self.workspace = ws; workspaces.set_active(ws.name); self.refresh_workspaces()
-            self.run_tab.accept_legacy = ws.legacy; self.run_tab.reattach()
+            self.run_tab.accept_legacy = ws.legacy; self.run_tab.reattach(); self.update_shared()
             self.setWindowTitle(f"SCOPE — {ws.name}"); self.ws_combo.setToolTip(f"Workspace '{ws.name}': its environment, input files and project on the cluster. Runs keep going whichever workspace is shown.")
         finally:
             self.loading = False
@@ -602,6 +609,46 @@ class MainWindow(QMainWindow):
         ws.remote_root, ws.remote_env = self.remote_tab.project()
         try: workspaces.save(ws)
         except OSError as exc: self.statusBar().showMessage(f"Could not save workspace '{ws.name}': {exc}", 15000)
+        self.update_shared()
+
+    def update_shared(self) -> None:
+        """Warns on the Cluster page when another workspace uses the same project folder on the same cluster."""
+        if self.workspace is None: return
+        prof = self.remote_tab.profiles.get(self.remote_tab.chooser.currentText()) if self.remote_tab.chooser.currentIndex() >= 0 else None
+        root, _ = self.remote_tab.project()
+        self.remote_tab.set_shared(workspaces.sharing(self.workspace.name, prof.host if prof else "", root, self.remote_tab.profiles))
+
+    def show_run(self, row) -> None:
+        """Shows a run listed on the Runs page in its workspace: a run on this computer on the Run page, a cluster run on the Cluster page (followed)."""
+        if row.names and (self.workspace is None or self.workspace.name not in row.names) and row.names[0] in workspaces.list_names(): self.switch_workspace(row.names[0])
+        if row.record is not None:
+            if self.run_tab.record is None or self.run_tab.record.get("id") != row.record["id"]: self.run_tab.attach(row.record, note="Shown from the Runs page.")
+            self.show_step("run")
+        else:
+            self.show_step("cluster"); self.remote_tab.stop_watching(); self.remote_tab.begin_watch(row.profile, row.system, row.log, f"Following the run of '{row.system}' on {row.where}.")
+
+    def export_workspace(self) -> None:
+        import json
+        self.save_workspace(); ws = self.workspace
+        path, _ = QFileDialog.getSaveFileName(self, "Export workspace", os.path.join(os.path.expanduser("~"), workspaces.file_name(ws.name)[:-5] + ".scopews.json"), "SCOPE workspace (*.json)")
+        if not path: return
+        data = workspaces.export_data(ws, self.remote_tab.profiles.get(ws.profile))
+        try:
+            with open(path, "w") as fh: json.dump(data, fh, indent=2)
+        except OSError as exc: QMessageBox.warning(self, "Not exported", str(exc)); return
+        self.statusBar().showMessage(f"Workspace '{ws.name}' exported to {path} (paths, input list and cluster connection; no project file is copied).", 15000)
+
+    def import_workspace(self) -> None:
+        import json
+        from scope.gui import remote
+        path, _ = QFileDialog.getOpenFileName(self, "Import workspace", os.path.expanduser("~"), "SCOPE workspace (*.json)")
+        if not path: return
+        try:
+            with open(path) as fh: ws, notes = workspaces.import_data(json.load(fh), remote.load_profiles())
+        except (OSError, ValueError) as exc: QMessageBox.warning(self, "Not imported", str(exc)); return
+        self.remote_tab.profiles = remote.load_profiles(); self.remote_tab.loading_project = True; self.remote_tab.reload_chooser(); self.remote_tab.loading_project = False
+        self.save_workspace(); self.load_workspace(ws)
+        if notes: QMessageBox.information(self, "Workspace imported", "\n\n".join(notes))
 
     def switch_workspace(self, name: str) -> None:
         if self.loading or not name or (self.workspace and name == self.workspace.name): return

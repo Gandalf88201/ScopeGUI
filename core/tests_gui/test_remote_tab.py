@@ -43,9 +43,16 @@ def test_cluster_page_end_to_end(cluster, local, tmp_path, monkeypatch):
     tab.poll_ms = 100; tab.run_remote(); wait(app, tab)
     assert "MANUAL ATTENTION" in tab.log.toPlainText() and "exit code 0" in tab.status.text() and win.step_done("run")
     assert os.path.isdir(os.path.join(cluster.remote_root, "Computations", "water", "demo"))
-    # download warns that the system file is replaced
-    asked.clear(); tab.download(preview=False); wait(app, tab)
-    assert asked and "replaces the local system file" in asked[-1]
+    # download: the results are listed, the newer system file is proposed, and only what is ticked is copied
+    open(os.path.join(cluster.remote_root, "Computations", "water", "demo", "opt.log"), "w").write("result\n")       # what a real job would leave there
+    dialog = tab.open_download(); t0 = time.time()
+    while (dialog.busy or not dialog.listing) and time.time() - t0 < 30: app.processEvents(); time.sleep(0.02)
+    assert [f.rel for f in dialog.files] == ["demo/opt.log"] and dialog.files[0].selected and dialog.with_system.isChecked() and dialog.download_btn.isEnabled()
+    dialog.start_download(); t0 = time.time()
+    while dialog.busy and time.time() - t0 < 60: app.processEvents(); time.sleep(0.02)
+    assert "System file replaced" in dialog.log.toPlainText() and [f.status for f in dialog.files] == ["same"]
+    assert open(os.path.join(info.computations_path, "water", "demo", "opt.log")).read() == "result\n"
+    dialog.close(); app.processEvents(); assert not dialog.isVisible()                                          # closing works (a method named `done` used to break it)
 
 def test_invalid_profile_is_not_used(monkeypatch):
     pytest.importorskip("PySide6")

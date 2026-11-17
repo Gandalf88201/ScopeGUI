@@ -141,3 +141,51 @@ def remote_fields(ws: Workspace, profile: "object | None") -> tuple:
 def suggested_remote_root(ws: Workspace) -> str:
     """A project folder to propose on the cluster for a new workspace."""
     return "~/scope_projects/" + file_name(ws.name)[:-5]
+
+def sharing(name: str, host: str, root: str, profiles: dict) -> list:
+    """Other workspaces whose project on the cluster is the same folder of the same host (the same system run from two of them would collide)."""
+    if not host or not root: return []
+    target = (host, root.rstrip("/")); out = []
+    for other in list_names():
+        if other == name: continue
+        ws = load(other); prof = profiles.get(ws.profile) if ws else None
+        if ws is None or prof is None: continue
+        other_root, _ = remote_fields(ws, prof)
+        if (prof.host, other_root.rstrip("/")) == target: out.append(other)
+    return out
+
+EXPORT_FORMAT = "scope-gui-workspace"
+
+def export_data(ws: Workspace, profile: "object | None") -> dict:
+    """What an exported workspace file holds: the workspace, and the connection of its profile (host and how to start scope; never a password, there is none to store)."""
+    data = {"format": EXPORT_FORMAT, "version": 1, "workspace": asdict(ws)}
+    data["workspace"]["legacy"] = False
+    if profile is not None: data["profile"] = {k: getattr(profile, k) for k in ("name", "host", "scope_bin", "activate")}
+    return data
+
+def import_data(data: dict, profiles: dict) -> tuple:
+    """Creates a workspace from an exported file. Returns (Workspace, notes). A name already in use gets ' (2)', ' (3)'…; a profile with the same name but a
+    different connection is imported under a new name, so no saved connection is ever replaced. Raises ValueError for a file that is not an exported workspace."""
+    from scope.gui import remote
+    if data.get("format") != EXPORT_FORMAT or "workspace" not in data: raise ValueError("This file is not an exported SCOPE workspace.")
+    raw = {k: v for k, v in data["workspace"].items() if k in Workspace.__dataclass_fields__}
+    ws = Workspace(**{**raw, "legacy": False}); notes = []
+    base, n, names = ws.name, 2, list_names()
+    while name_problem(ws.name, names): ws.name = f"{base} ({n})"; n += 1
+    if ws.name != base: notes.append(f"A workspace called '{base}' exists: the imported one is '{ws.name}'.")
+    conn = data.get("profile")
+    if conn:
+        incoming = remote.Profile(conn.get("name", ""), conn.get("host", ""), conn.get("scope_bin", ""), conn.get("activate", ""))
+        existing = profiles.get(incoming.name)
+        if existing is None or (existing.host, existing.scope_bin, existing.activate) != (incoming.host, incoming.scope_bin, incoming.activate):
+            if existing is not None:
+                k = 2
+                while f"{incoming.name}_{k}" in profiles: k += 1
+                incoming.name = f"{incoming.name}_{k}"; notes.append(f"A different profile called '{conn.get('name')}' exists: the imported connection is saved as '{incoming.name}'.")
+            if not remote.connection_problems(incoming): remote.save_profile(incoming, connection_only=True)
+            else: notes.append("The connection in the file is incomplete and was not saved."); incoming.name = ""
+        ws.profile = incoming.name
+    missing = [p for p in [ws.env_path, *ws.inputs] if p and not os.path.exists(p)]
+    if missing: notes.append(f"{len(missing)} path(s) of this workspace do not exist on this computer (for instance {missing[0]}). Open the environment and the inputs from where they are here.")
+    save(ws)
+    return ws, notes

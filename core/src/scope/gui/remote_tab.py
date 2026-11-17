@@ -37,7 +37,7 @@ class RemoteTab(QWidget):
         project_title = QLabel("Project on the cluster  (this workspace)"); project_title.setObjectName("sectiontitle")
         form.addRow(project_title)
         for label, w in (("Project folder on the cluster", self.root), ("Cluster environment file", self.env_file)): form.addRow(label, w)
-        self.loading_project = False
+        self.loading_project, self.shared = False, []
         top = QHBoxLayout(); top.addWidget(QLabel("Profile")); top.addWidget(self.chooser); top.addWidget(self.new_btn); top.addWidget(self.delete_btn); top.addStretch(1)
         self.terminal_btn, self.test_btn = QPushButton("Show terminal command"), QPushButton("Test connection"); self.test_btn.setProperty("primary", True)
         self.save_btn.setProperty("primary", True); row1 = QHBoxLayout(); row1.addWidget(self.save_btn); row1.addWidget(self.terminal_btn); row1.addWidget(self.test_btn); row1.addStretch(1)
@@ -45,12 +45,13 @@ class RemoteTab(QWidget):
         self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents); self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents); self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch); self.table.verticalHeader().setVisible(False)
         self.table.setWordWrap(True)
         self.system = QComboBox(); self.system.setMinimumWidth(200)
-        self.pre_up, self.up, self.run_btn, self.pre_down, self.down = (QPushButton(t) for t in ("Preview upload", "Upload", "Run on the cluster", "Preview download", "Download"))
+        self.pre_up, self.up, self.run_btn, self.down = (QPushButton(t) for t in ("Preview upload", "Upload", "Run on the cluster", "Download results…"))
+        self.down.setToolTip("List the results of the selected system on the cluster and choose which files to bring back into this workspace's folders."); self.download_dialog = None
         self.watch_btn, self.unwatch_btn, self.stopcl_btn = QPushButton("Watch runs"), QPushButton("Stop watching"), QPushButton("Stop the run")
         self.watch_btn.setToolTip("Find a run that is active on the cluster (started from this window earlier, or before it was closed) and follow its log.")
         self.unwatch_btn.setToolTip("Stop following the log. The run itself keeps going on the cluster."); self.stopcl_btn.setToolTip("Ask the cluster to end the run (SCOPE continues where it stopped the next time you run).")
         self.run_btn.setProperty("primary", True); self.unwatch_btn.setEnabled(False); self.stopcl_btn.setEnabled(False)
-        row2 = QHBoxLayout(); row2.addWidget(QLabel("System")); row2.addWidget(self.system); [row2.addWidget(b) for b in (self.pre_up, self.up, self.pre_down, self.down)]; row2.addStretch(1)
+        row2 = QHBoxLayout(); row2.addWidget(QLabel("System")); row2.addWidget(self.system); [row2.addWidget(b) for b in (self.pre_up, self.up, self.down)]; row2.addStretch(1)
         row3 = QHBoxLayout(); [row3.addWidget(b) for b in (self.run_btn, self.watch_btn, self.unwatch_btn, self.stopcl_btn)]; row3.addStretch(1)
         self.log, self.status = QPlainTextEdit(), QLabel("Nothing has been sent to the cluster yet."); self.log.setReadOnly(True); self.log.setLineWrapMode(QPlainTextEdit.NoWrap)
         head = QLabel("SCOPE runs on the cluster; this window starts it over SSH and moves files with rsync. Your SSH setup is used as it is and no password is stored. Nothing is sent until you press a button."); head.setWordWrap(True); head.setObjectName("pagesub")
@@ -69,7 +70,7 @@ class RemoteTab(QWidget):
         self.terminal_btn.clicked.connect(self.show_terminal_command); self.test_btn.clicked.connect(self.test_connection)
         self.pre_up.clicked.connect(lambda: self.upload(preview=True)); self.up.clicked.connect(lambda: self.upload(preview=False)); self.run_btn.clicked.connect(self.run_remote)
         self.watch_btn.clicked.connect(self.watch_runs); self.unwatch_btn.clicked.connect(self.stop_watching); self.stopcl_btn.clicked.connect(self.stop_cluster_run)
-        self.pre_down.clicked.connect(lambda: self.download(preview=True)); self.down.clicked.connect(lambda: self.download(preview=False))
+        self.down.clicked.connect(self.open_download)
         session.systemsChanged.connect(self.refresh_systems); session.envChanged.connect(self.refresh_systems); theme.on_change(self.render_checks); theme.on_change(self.render_lights)
         self.reload_chooser(); self.refresh_systems(); self.update_hint(); self.render_lights()
 
@@ -100,6 +101,10 @@ class RemoteTab(QWidget):
         self.root.setPlaceholderText(f"{suggestion}  (a folder on the cluster; it need not exist yet)" if suggestion else "~/scope_project  (a folder on the cluster; it need not exist yet)")
         self.loading_project = False; self.update_hint()
 
+    def set_shared(self, names: list) -> None:
+        """Other workspaces that use the same project folder on the same cluster (shown as a warning)."""
+        self.shared = list(names); self.update_hint()
+
     def project(self) -> tuple:
         return self.root.text().strip(), self.env_file.text().strip()
 
@@ -115,6 +120,9 @@ class RemoteTab(QWidget):
         labels = {"name": "Profile name", "host": "SSH host", "scope_bin": "Path of scope", "root": "Project folder", "env": "Environment file"}
         if problems: self.hint.setText("To complete the profile and the project:\n" + "\n".join(f"  • {labels[k]}: {v}" for k, v in problems.items())); set_kind(self.hint, "warn")
         else: self.hint.setText("✓ The connection and the project are complete. Save the profile, then Test connection."); set_kind(self.hint, "ok")
+        if self.shared:
+            self.hint.setText(self.hint.text() + f"\n⚠ The same project folder on this cluster is used by workspace(s): {', '.join(self.shared)}. Do not run the same system from both: the cluster refuses a second run of a system that is running, but results registered in one workspace are not seen by the other until you download them.")
+            set_kind(self.hint, "warn")
         root = self.root.text().strip()
         self.env_file.setPlaceholderText((root.rstrip("/") + "/scope_env_<name>.npy") if root else "~/scope_project/scope_env_cluster.npy")
 
@@ -152,7 +160,7 @@ class RemoteTab(QWidget):
     ##### connection test #####
     def set_busy(self, busy: bool, message: str="") -> None:
         self.busy = busy
-        for b in (self.test_btn, self.pre_up, self.up, self.pre_down, self.down, self.watch_btn): b.setEnabled(not busy)
+        for b in (self.test_btn, self.pre_up, self.up, self.down, self.watch_btn): b.setEnabled(not busy)
         self.run_btn.setEnabled(not busy and not self.watching)
         if message: self.status.setText(message)
 
@@ -242,18 +250,15 @@ class RemoteTab(QWidget):
             self.background(lambda: remote.sync(items, dry_run=False), lambda r: (self.show_sync(r, "Copied"), self.status.setText("Upload finished.")), "Uploading…")
         self.background(work, done, "Checking what would be copied…")
 
-    def download(self, preview: bool) -> None:
+    def open_download(self) -> "object | None":
+        """Opens the download dialog for the selected system: list, choose, copy into this workspace's folders (or copy the command line)."""
         got = self.need()
-        if not got: return
-        p, info, system = got; items = remote.download_items(p, info, system)
-        def done(dry):
-            n = self.show_sync(dry, "Would copy"); self.status.setText(f"Preview: {n} change(s). Nothing was copied.")
-            if preview or n == 0: return
-            replaces = any(f"{system}.npy" in l for kind, _, lines in dry if kind == "system" for l in lines)
-            note = f"\n\nThis replaces the local system file {system}.npy with the cluster's. Anything registered only locally since the last upload would be lost." if replaces else ""
-            if QMessageBox.question(self, "Download", f"Copy {n} change(s) from {p.host}?{note}") != QMessageBox.Yes: return
-            self.background(lambda: remote.sync(items, dry_run=False), lambda r: (self.show_sync(r, "Copied"), self.status.setText("Download finished."), self.session.systemsChanged.emit()), "Downloading…")
-        self.background(lambda: remote.sync(items, dry_run=True), done, "Checking what would be copied…")
+        if not got: return None
+        from scope.gui.download_dialog import DownloadDialog
+        p, info, system = got
+        self.download_dialog = DownloadDialog(self, p, info, system); self.download_dialog.downloaded.connect(self.session.systemsChanged.emit)
+        self.download_dialog.setWindowModality(Qt.WindowModal); self.download_dialog.show()
+        return self.download_dialog
 
     ##### run: started detached, followed by reading its log #####
     def run_remote(self) -> None:
@@ -264,6 +269,7 @@ class RemoteTab(QWidget):
         if not self.unique_inputs([r.path for r in valid]): return
         submit = [r for r in valid if r.want_submit]
         note = (f"\n\n{len(submit)} input file(s) have want_submit = True: jobs WILL be submitted to the scheduler and use computing time." if submit else "\n\nNo input file asks to submit.")
+        if self.shared: note += f"\n\nThis project folder is also used by workspace(s): {', '.join(self.shared)}."
         missing = remote.unavailable_software(self.lights, valid)
         if missing: note += "\n\nWARNING from the last connection test:\n" + "\n".join(missing)
         if QMessageBox.question(self, "Run on the cluster", f"Start `scope run` for '{system}' on {p.host}, with the files uploaded in {p.remote_root}/inputs.\n\nThe run is detached: it keeps going on the cluster if you close this window or lose the connection.{note}") != QMessageBox.Yes: return
@@ -302,7 +308,7 @@ class RemoteTab(QWidget):
             if d["exit"] == 143: self.status.setText("The cluster run was stopped. Run again: SCOPE continues where it stopped.")
             elif d["exit"] is not None:
                 self.status.setText(f"Cluster run finished with exit code {d['exit']}.")
-                if d["exit"] == 0: self.session.mark("ran")
+                if d["exit"] == 0: self.session.mark("ran"); self.status.setText(f"Cluster run finished with exit code 0. Press Download results… to bring the results back.")
             else: self.status.setText("The cluster run ended without finishing (stopped or killed). Run again: SCOPE continues where it stopped.")
 
     def stop_watching(self) -> None:
