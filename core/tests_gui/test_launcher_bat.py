@@ -21,6 +21,7 @@ def test_every_goto_and_call_target_exists_and_no_label_is_defined_twice():
 
 def test_same_options_and_settings_as_the_shell_launcher():
     sh = (ROOT / "scope-gui").read_text()
-    for token in ("--where", "--reinstall", "SCOPE_GUI_HOME", "SCOPE_GUI_PYTHON", "installed.stamp", "pip install", "-e", "[gui]", "scope.cli.main"):
+    for token in ("--where", "--reinstall", "SCOPE_GUI_HOME", "SCOPE_GUI_PYTHON", "installed.stamp", "pip install", "-e", "[gui]", "scope.cli.main", "import cell2mol",
+                  "cell2mol @ git+https://github.com/lcmd-epfl/cell2mol.git@55649ba5f444895846a5d049adcb056c01bb0421"):
         assert token in TEXT and token in sh, token
     assert "-3.12" in TEXT and "(3,12)" in TEXT and "LOCALAPPDATA" in TEXT                    # Python 3.12 only, per-user folder

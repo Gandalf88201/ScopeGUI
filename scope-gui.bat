@@ -2,8 +2,9 @@
 rem scope-gui.bat: opens the SCOPE graphical interface from a source checkout, with nothing to set up by hand (Windows).
 rem
 rem The first time, it finds a Python 3.12, creates a private virtual environment, installs SCOPE (editable, with the
-rem GUI extra) from this folder and opens the window. Later starts reuse the environment. It is reinstalled by itself
-rem when core\pyproject.toml changes (for instance after "git pull").
+rem GUI extra) from this folder, then cell2mol (SCOPE's README asks for it, from a pinned Git commit; it needs git),
+rem and opens the window. Later starts reuse the environment. It is reinstalled by itself when core\pyproject.toml
+rem changes (for instance after "git pull").
 rem
 rem   scope-gui.bat                  open the GUI
 rem   scope-gui.bat -n env.npy       open the GUI with an Environment file
@@ -29,6 +30,11 @@ set "HOMEDIR=%SCOPE_GUI_HOME%"
 set "VENV=%HOMEDIR%\venv"
 set "VPY=%VENV%\Scripts\python.exe"
 set "STAMP=%HOMEDIR%\installed.stamp"
+
+rem cell2mol is not on PyPI: SCOPE's README installs it from this commit (keep both in sync). It is part of the
+rem fingerprint, so environments made before it was added get it on their next start.
+set "C2M=cell2mol @ git+https://github.com/lcmd-epfl/cell2mol.git@55649ba5f444895846a5d049adcb056c01bb0421"
+set "C2MID=55649ba5f444895846a5d049adcb056c01bb0421"
 
 set "REINSTALL=0"
 set "ARGS="
@@ -90,13 +96,19 @@ if "%REINSTALL%"=="1" goto install
 set "OLD="
 if exist "%STAMP%" set /p OLD=<"%STAMP%"
 if "!OLD!"=="!FP!" goto launch
-echo scope-gui: core\pyproject.toml changed, updating the installation.
+echo scope-gui: the installation recipe changed (core\pyproject.toml or cell2mol), updating.
 
 :install
 echo scope-gui: installing SCOPE and the GUI from %CORE% (internet needed; the first time takes a few minutes).
 if exist "%STAMP%" del "%STAMP%"
 "%VPY%" -m pip install --disable-pip-version-check -e "%CORE%[gui]"
 if errorlevel 1 goto installfail
+"%VPY%" -c "import cell2mol" >nul 2>&1
+if not errorlevel 1 goto c2mdone
+echo scope-gui: installing cell2mol (needs git and internet).
+"%VPY%" -m pip install --disable-pip-version-check "%C2M%"
+if errorlevel 1 echo scope-gui: WARNING: cell2mol could not be installed (is git installed?). The GUI opens anyway; install git and run scope-gui.bat --reinstall to retry. 1>&2
+:c2mdone
 >"%STAMP%" echo !FP!
 
 :launch
@@ -110,7 +122,7 @@ exit /b %errorlevel%
 :fingerprint
 set "FP="
 for /f "skip=1 tokens=*" %%H in ('certutil -hashfile "%CORE%\pyproject.toml" MD5') do if not defined FP set "FP=%%H"
-set "FP=!FP: =!"
+set "FP=!FP: =!-c2m!C2MID:~0,7!"
 exit /b 0
 
 :nocore

@@ -2,7 +2,8 @@
 # scope-gui: opens the SCOPE graphical interface from a source checkout, with nothing to set up by hand.
 #
 # The first time, it finds a Python 3.12, creates a private virtual environment, installs SCOPE (editable, with the
-# GUI extra) from this folder and opens the window. Later starts reuse the environment and are immediate. It is
+# GUI extra) from this folder, then cell2mol (SCOPE's README asks for it, from a pinned Git commit; it needs git),
+# and opens the window. Later starts reuse the environment and are immediate. It is
 # reinstalled by itself when core/pyproject.toml changes (for instance after `git pull`).
 #
 #   ./scope-gui                  open the GUI
@@ -53,7 +54,10 @@ find_python() {
     return 1
 }
 
-fingerprint() { cksum < "$core/pyproject.toml" | awk '{print $1 "-" $2}'; }
+# cell2mol is not on PyPI: SCOPE's README installs it from this commit (keep both in sync). It is part of the
+# fingerprint, so environments made before it was added get it on their next start.
+CELL2MOL="cell2mol @ git+https://github.com/lcmd-epfl/cell2mol.git@55649ba5f444895846a5d049adcb056c01bb0421"
+fingerprint() { local c="${CELL2MOL##*@}"; echo "$(cksum < "$core/pyproject.toml" | awk '{print $1 "-" $2}')-c2m${c:0:7}"; }
 
 if [ -x "$venv/bin/python" ] && ! is_312 "$venv/bin/python"; then
     echo "scope-gui: the private environment in $venv is not Python 3.12 (was Python replaced?). Delete that folder and run ./scope-gui again." >&2; exit 1
@@ -78,7 +82,7 @@ EOF
 fi
 
 if [ "$reinstall" = 0 ] && [ "$(cat "$stamp" 2>/dev/null)" != "$(fingerprint)" ]; then
-    echo "scope-gui: core/pyproject.toml changed, updating the installation."
+    echo "scope-gui: the installation recipe changed (core/pyproject.toml or cell2mol), updating."
     reinstall=1
 fi
 
@@ -87,6 +91,11 @@ if [ "$reinstall" = 1 ]; then
     rm -f "$stamp"
     "$venv/bin/python" -m pip install --disable-pip-version-check -e "$core[gui]" || {
         echo "scope-gui: the installation failed. Check the internet connection and run ./scope-gui again (use ./scope-gui --reinstall to retry from scratch)." >&2; exit 1; }
+    if ! "$venv/bin/python" -c "import cell2mol" >/dev/null 2>&1; then
+        echo "scope-gui: installing cell2mol (needs git and internet)."
+        "$venv/bin/python" -m pip install --disable-pip-version-check "$CELL2MOL" || {
+            echo "scope-gui: WARNING: cell2mol could not be installed (is git installed?). The GUI opens anyway; install git and run ./scope-gui --reinstall to retry." >&2; }
+    fi
     fingerprint > "$stamp"
 fi
 

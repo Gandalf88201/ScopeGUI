@@ -9,6 +9,8 @@ pytestmark = pytest.mark.skipif(sys.platform == "win32" or shutil.which("bash") 
 FAKE_PYTHON = """#!/bin/bash
 case "$*" in
   *version_info*) exit 0 ;;                                  # "is this a Python 3.12?"
+  *"import cell2mol"*) exit ${C2M_PRESENT_EXIT:-0} ;;        # "is cell2mol installed?" (default: yes)
+  "-m pip install"*"cell2mol @"*) echo "PIP $*" >> "$LOG"; exit ${C2M_EXIT:-0} ;;
   "-m pip"*)      echo "PIP $*" >> "$LOG"; exit ${PIP_EXIT:-0} ;;
   *)              echo "LAUNCH $*" >> "$LOG"; exit 0 ;;
 esac
@@ -27,8 +29,10 @@ def run(root, home, *args, log, **env):
     e = {**os.environ, "SCOPE_GUI_HOME": str(home), "LOG": str(log), **env}
     return subprocess.run([str(root / "scope-gui"), *args], capture_output=True, text=True, env=e)
 
+C2M_COMMIT = "55649ba"                                                                         # first 7 characters of the commit pinned in SCOPE's README
+
 def stamp(root) -> str:
-    return subprocess.run("cksum < core/pyproject.toml | awk '{print $1 \"-\" $2}'", shell=True, cwd=root, capture_output=True, text=True).stdout.strip()
+    return subprocess.run("cksum < core/pyproject.toml | awk '{print $1 \"-\" $2}'", shell=True, cwd=root, capture_output=True, text=True).stdout.strip() + "-c2m" + C2M_COMMIT
 
 def test_an_up_to_date_environment_is_reused_and_arguments_are_passed_on(repo, tmp_path):
     root, home = repo; log = tmp_path / "log"
@@ -78,3 +82,32 @@ def test_missing_core_folder_is_reported(tmp_path):
     lonely = tmp_path / "scope-gui"; shutil.copy(SCRIPT, lonely)
     done = subprocess.run([str(lonely)], capture_output=True, text=True)
     assert done.returncode == 1 and "core/pyproject.toml" in done.stderr
+
+def test_cell2mol_is_installed_from_the_pinned_commit_when_missing(repo, tmp_path):
+    root, home = repo; log = tmp_path / "log"
+    (home / "installed.stamp").write_text("0-0\n")
+    done = run(root, home, log=log, C2M_PRESENT_EXIT="1")
+    assert done.returncode == 0, done.stderr
+    pips = [l for l in log.read_text().splitlines() if l.startswith("PIP")]
+    assert len(pips) == 2 and "[gui]" in pips[0] and "cell2mol @ git+https://github.com/lcmd-epfl/cell2mol.git@55649ba5f444895846a5d049adcb056c01bb0421" in pips[1]
+    assert log.read_text().splitlines()[-1].startswith("LAUNCH")
+
+def test_cell2mol_already_present_is_not_reinstalled(repo, tmp_path):
+    root, home = repo; log = tmp_path / "log"
+    (home / "installed.stamp").write_text("0-0\n")
+    run(root, home, log=log)                                                                   # default: the fake says cell2mol is there
+    assert len([l for l in log.read_text().splitlines() if l.startswith("PIP")]) == 1
+
+def test_a_failed_cell2mol_install_warns_but_still_opens_the_gui(repo, tmp_path):
+    root, home = repo; log = tmp_path / "log"
+    (home / "installed.stamp").write_text("0-0\n")
+    done = run(root, home, log=log, C2M_PRESENT_EXIT="1", C2M_EXIT="1")
+    assert done.returncode == 0 and "WARNING: cell2mol could not be installed" in done.stderr and "--reinstall" in done.stderr
+    assert log.read_text().splitlines()[-1].startswith("LAUNCH") and (home / "installed.stamp").read_text().strip() == stamp(root)
+
+def test_an_environment_made_before_cell2mol_was_added_gets_it_on_the_next_start(repo, tmp_path):
+    root, home = repo; log = tmp_path / "log"
+    old = stamp(root).rsplit("-c2m", 1)[0]                                                     # the stamp the first launcher version wrote: no cell2mol part
+    (home / "installed.stamp").write_text(old + "\n")
+    done = run(root, home, log=log, C2M_PRESENT_EXIT="1")
+    assert "recipe changed" in done.stdout and any("cell2mol @" in l for l in log.read_text().splitlines())
