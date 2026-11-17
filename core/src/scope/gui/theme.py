@@ -88,6 +88,12 @@ def stylesheet(c: dict) -> str:
     QLabel#pagetitle {{ font-size: 22px; font-weight: 700; color: {c['text']}; }}
     QLabel#pagesub {{ color: {c['sub']}; }}
     QLabel#badge {{ background: {c['alt']}; border: 1px solid {c['border']}; border-radius: 10px; padding: 3px 10px; color: {c['sub']}; }}
+    QListWidget#manualtoc {{ background: transparent; border: none; outline: 0; }}
+    QListWidget#manualtoc::item {{ padding: 7px 10px; margin: 1px 0; border-radius: 6px; color: {c['text']}; }}
+    QListWidget#manualtoc::item:hover {{ background: {c['alt']}; }}
+    QListWidget#manualtoc::item:selected {{ background: {c['highlight']}; color: {c['text']}; font-weight: 600; }}
+    QListWidget#manualtoc::item:disabled {{ color: {c['sub']}; padding-top: 14px; }}
+    QTextBrowser#manualview {{ background: {c['base']}; border: 1px solid {c['border']}; border-radius: 10px; padding: 0; }}
     QFrame#card {{ background: {c['base']}; border: 1px solid {c['border']}; border-radius: 10px; }}
     """
 
