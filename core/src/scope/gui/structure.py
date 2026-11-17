@@ -116,21 +116,65 @@ def structures_for(row, sources_path: str="") -> list:
     found = read_xyz(xyz, row.name) if xyz and os.path.isfile(xyz) else None
     return [found] if found else []
 
-def drawing_svg(s: Structure, width: int=360, height: int=260, dark: bool=False) -> tuple:
-    """A 2D drawing of the structure (RDKit), hydrogens on carbon hidden. Returns (svg, note): svg is '' if it cannot be drawn.
+def view_frame(s: Structure) -> list:
+    """The orientation in which the molecule is spread out most on the screen: rows are the principal axes of the heavy atoms (all atoms if there
+    are fewer than three heavy ones), largest spread first, right-handed. The 3D view starts (and resets) in this frame and the 2D drawing is
+    turned to match it, so both show the molecule the same way round."""
+    import numpy as np
+    heavy = [i for i, l in enumerate(s.labels) if l != "H"]
+    idx = heavy if len(heavy) >= 3 else list(range(len(s.labels)))
+    pts = np.array([s.coords[i] for i in idx], dtype=float)
+    if len(pts) < 2: return [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
+    pts -= pts.mean(axis=0)
+    _, _, vt = np.linalg.svd(pts, full_matrices=True)
+    e1, e2 = vt[0], vt[1] if len(vt) > 1 else np.array([0.0, 1.0, 0.0])
+    e3 = np.cross(e1, e2)
+    return [list(map(float, e1)), list(map(float, e2)), list(map(float, e3))]
+
+def project(s: Structure, frame: list, indices: list) -> list:
+    """Screen-plane (x, y) of some atoms in a frame, centred on those atoms."""
+    import numpy as np
+    pts = np.array([s.coords[i] for i in indices], dtype=float); pts -= pts.mean(axis=0)
+    return (pts @ np.array(frame, dtype=float)[:2].T).tolist()
+
+def align_2d(coords2d: list, target: list) -> list:
+    """Turns (and, if that fits better, mirrors) 2D coordinates so they best match `target` (least squares, same atoms, same order)."""
+    import numpy as np
+    q = np.array(coords2d, dtype=float); q -= q.mean(axis=0); t = np.array(target, dtype=float); t -= t.mean(axis=0)
+    if len(q) < 2 or not np.any(q) or not np.any(t): return q.tolist()
+    u, _, vt = np.linalg.svd(q.T @ t)
+    return (q @ (u @ vt)).tolist()
+
+def depiction(s: Structure, frame: list=None) -> tuple:
+    """The RDKit molecule as drawn in 2D: SCOPE's atoms and bonds, hydrogens on carbon hidden, flat coordinates turned (and mirrored if that
+    fits better) to match the screen plane of `frame` (see view_frame). Each atom keeps its SCOPE index as the int property 'scope_index'.
+    Returns (mol or None, note)."""
+    from rdkit import Chem
+    from rdkit.Chem import rdDepictor
+    from rdkit.Geometry import Point3D
+    mol, note = rdkit_mol(s)
+    if mol is None: return None, ""
+    for atom in mol.GetAtoms(): atom.SetIntProp("scope_index", atom.GetIdx())
+    try: shown = Chem.RemoveHs(mol, sanitize=False)
+    except Exception: shown = mol
+    rdDepictor.Compute2DCoords(shown)
+    if frame is not None and shown.GetNumAtoms() >= 2:
+        conf = shown.GetConformer(); order = [a.GetIntProp("scope_index") for a in shown.GetAtoms()]
+        flat = align_2d([[conf.GetAtomPosition(k).x, conf.GetAtomPosition(k).y] for k in range(shown.GetNumAtoms())], project(s, frame, order))
+        for k, (x, y) in enumerate(flat): conf.SetAtomPosition(k, Point3D(x, y, 0.0))
+    return shown, note
+
+def drawing_svg(s: Structure, width: int=360, height: int=260, dark: bool=False, frame: list=None) -> tuple:
+    """A 2D drawing of the structure (RDKit), hydrogens on carbon hidden, turned like the 3D view when `frame` is given. Returns (svg, note):
+    svg is '' if it cannot be drawn.
 
     The drawing uses exactly SCOPE's atoms and bonds: no hydrogen is ever added. Bond orders (double bonds, aromatic rings) are shown
     when RDKit can assign them from the geometry and the charge; otherwise every bond is drawn single and the note says so.
     """
     try:
-        from rdkit import Chem
-        from rdkit.Chem import rdDepictor
         from rdkit.Chem.Draw import rdMolDraw2D
-        mol, note = rdkit_mol(s)
-        if mol is None: return "", ""
-        try: shown = Chem.RemoveHs(mol, sanitize=False)
-        except Exception: shown = mol
-        rdDepictor.Compute2DCoords(shown)
+        shown, note = depiction(s, frame)
+        if shown is None: return "", ""
         drawer = rdMolDraw2D.MolDraw2DSVG(width, height); opts = drawer.drawOptions(); opts.clearBackground = False; opts.padding = 0.08
         if dark:
             try: rdMolDraw2D.SetDarkMode(opts)

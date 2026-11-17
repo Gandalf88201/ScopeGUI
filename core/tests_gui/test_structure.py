@@ -53,6 +53,32 @@ def test_the_drawing_never_invents_hydrogens_and_says_when_bond_orders_are_unkno
     assert all(a.GetNumImplicitHs() == 0 for a in mol.GetAtoms()) and mol.GetNumAtoms() == 22                     # drawn as SCOPE has it, nothing added
     svg, note = structure.drawing_svg(broken, dark=True); assert "<svg" in svg and note
 
+def test_the_2d_drawing_is_turned_like_the_3d_view():
+    import numpy as np
+    s = structure.read_xyz(ESTER); frame = structure.view_frame(s); f = np.array(frame)
+    assert np.allclose(f @ f.T, np.eye(3), atol=1e-9) and np.linalg.det(f) > 0                                    # a proper rotation
+    mol, _ = structure.depiction(s, frame)
+    order = [a.GetIntProp("scope_index") for a in mol.GetAtoms()]; conf = mol.GetConformer()
+    flat = np.array([[conf.GetAtomPosition(k).x, conf.GetAtomPosition(k).y] for k in range(mol.GetNumAtoms())])
+    screen = np.array(structure.project(s, frame, order))
+    assert np.corrcoef(flat[:, 0], screen[:, 0])[0, 1] > 0.9 and np.corrcoef(flat[:, 1], screen[:, 1])[0, 1] > 0   # same way round (a zig-zag chain matches its 3D shape only loosely across)
+    turned = [[-y, x] for x, y in screen.tolist()]                                                                # align_2d undoes a turn exactly
+    assert np.allclose(structure.align_2d(turned, screen.tolist()), screen - screen.mean(axis=0), atol=1e-9)
+
+def test_the_2d_drawing_keeps_its_proportions_and_details_open_in_a_window(ester_system):
+    app = qapp(); from scope.gui.structure_view import SvgView, StructurePanel
+    from PySide6.QtCore import QByteArray
+    svg, _ = structure.drawing_svg(structure.read_xyz(ESTER), 360, 260)
+    view = SvgView(); view.resize(900, 200); view.load(QByteArray(svg.encode())); view.show(); app.processEvents()
+    r = view.target(); assert abs(r.width() / r.height() - 360 / 260) < 1e-6 and r.height() == 200 and abs(r.center().x() - 450) < 1   # letterboxed, not stretched to 900 wide
+    view.resize(300, 600); r = view.target(); assert abs(r.width() / r.height() - 360 / 260) < 1e-6 and r.width() == 300; view.grab()
+    panel = StructurePanel(); panel.set_structures([structure.read_xyz(ESTER)], "line one\nline two", "ester")
+    assert panel.view.rot == panel.view.frame                                                                       # starts in the frame of the 2D drawing
+    panel.view.rot = [[0, 1, 0], [1, 0, 0], [0, 0, -1]]; panel.view.reset(); assert panel.view.rot == panel.view.frame
+    panel.open_details(); app.processEvents(); d = panel.details_dialog
+    assert d.isVisible() and d.text.toPlainText() == "line one\nline two" and d.text.isReadOnly() and d.windowTitle() == "SCOPE details — ester"
+    panel.open_details(); assert panel.details_dialog is d; d.close()                                               # one window, reused
+
 def qapp():
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     pytest.importorskip("PySide6")
@@ -68,7 +94,9 @@ def test_systems_page_shows_the_first_system_at_once_and_follows_the_selection(e
     win.sys_tab.table.selectRow(names.index("ester")); app.processEvents()
     assert panel.formula.text() == "C7H14O2" and panel.atoms.text().startswith("23") and "SCOPE perceived" in panel.origin.text()
     assert panel.chooser.count() == 1 and panel.drawing.isVisibleTo(panel) and "Bond orders" not in panel.no_drawing.text()
-    panel.details_btn.click(); assert panel.details.isVisibleTo(panel) and "ester" in panel.details.toPlainText().lower()
+    panel.details_btn.click(); app.processEvents()
+    assert panel.details_dialog.isVisible() and "ester" in panel.details_dialog.text.toPlainText().lower() and panel.details_dialog.width() >= 900   # its own, readable window
+    assert "ester" in panel.details_dialog.windowTitle()
 
 def test_the_3d_view_rotates_zooms_resets_and_draws(ester_system):
     app = qapp(); from PySide6.QtCore import QPoint, QPointF, Qt

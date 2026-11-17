@@ -170,11 +170,11 @@ The table lists the systems found in the environment's Systems folder, with the 
 
 The lower half shows the structure SCOPE will compute, as SCOPE holds it in the system file: the atoms, their coordinates and the bonds SCOPE perceived.
 
-- **3D view:** drag to rotate, scroll to zoom, double-click (or **Reset view**) to start again. **Hydrogens** and **Element labels** switch what is drawn.
+- **3D view:** drag to rotate, scroll to zoom, double-click (or **Reset view**) to start again. The start view shows the molecule spread out as much as possible, turned the same way as the 2D drawing, so the two can be compared atom by atom. **Hydrogens** and **Element labels** switch what is drawn.
 - **Show:** each source of the system and each of its states. A new system has one state, *initial*; after calculations, the geometries they produced (an optimised structure, for instance) appear here too, so you can compare them.
 - **Formula, atoms, charge and spin** are read from the system.
-- **2D drawing:** the same atoms and bonds drawn flat, with double bonds and aromatic rings when they can be worked out from the geometry and the charge. No atom is ever added: if the bond orders cannot be worked out (a missing hydrogen, a radical, a metal), every bond is drawn single and a line under the drawing says so. That line is also a useful warning that the structure may not be what you meant.
-- **SCOPE details…** shows SCOPE's own text description of the system: sources, branches, folders.
+- **2D drawing:** the same atoms and bonds drawn flat, with double bonds and aromatic rings when they can be worked out from the geometry and the charge. No atom is ever added: if the bond orders cannot be worked out (a missing hydrogen, a radical, a metal), every bond is drawn single and a line under the drawing says so. The drawing keeps its proportions at any size of the window. That line is also a useful warning that the structure may not be what you meant.
+- **SCOPE details…** opens SCOPE's own text description of the system (sources, branches, folders) in a separate window that you can resize, scroll and copy from. It stays open while you select other systems and is updated when you press the button again.
 
 > **Note.** If the system file cannot be read, the window shows the system's `.xyz` file instead, with bonds guessed from distances, and says so.
 

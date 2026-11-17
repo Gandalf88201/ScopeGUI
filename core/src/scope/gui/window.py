@@ -196,8 +196,8 @@ class SystemsTab(QWidget):
         try: details = backend.system_details(r.file) if r.file else "No system binary in this folder."
         except Exception as exc: details = f"Cannot read {r.file}\n{type(exc).__name__}: {exc}"
         found = structure.structures_for(r, self.session.info.sources_path if self.session.info else "")
-        if found: self.structure.set_structures(found, details)
-        else: self.structure.clear("No structure could be read for this system."); self.structure.details.setPlainText(details)
+        if found: self.structure.set_structures(found, details, r.name)
+        else: self.structure.clear("No structure could be read for this system.", details)
 
 ####################
 ### Pipeline tab ###
