@@ -14,6 +14,7 @@ from scope.classes_state import *
 # 2) in Execute_Job, we manage the relationship between the registration, and the computational workflow (Branch, Workflow, Job, Computation)
 ######################################################################
 def reg_general(comp: object, debug: int=0):
+    """Stores parsed termination, timing and result status on the Computation."""
     if not hasattr(comp,"output"): comp.create_output() 
     comp.isfinished              = comp.output.get_status_finished()
     comp.elapsed_time            = comp.output.get_elapsed_time() 
@@ -30,6 +31,8 @@ def reg_optimization(comp: object, debug: int=0):
 
     Keeps each Computation's forces before discarding its output object. Stores
     forces on the final State when available, in the parser's force units.
+    A partial optimization can supply its last complete geometry while
+    comp.isgood remains False; usable results do not imply convergence.
     """
     ### 0-In Case Reg_General hasn't been run:
     if not hasattr(comp,"output"): reg_general(comp)

@@ -83,6 +83,16 @@ class G16_output(object):
         return self.scf_finished
 
     def get_last_block_status(self, debug: int=0):
+        """Classifies available results independently of completion and convergence.
+
+        'worked' indicates usable results. For opt/ts, an earlier complete
+        SCF/geometry block is sufficient when the final SCF is unfinished.
+        'aborted' indicates incomplete output without usable results for the
+        calculation type. Explicit SCF failure remains 'no_scf_convergence'.
+
+        get_status_finished() reports termination separately, and
+        get_optimization_finished() reports optimization convergence.
+        """
         lines_last_opt_block = self.get_lines_last_opt_block()
         if lines_last_opt_block is None: return "aborted"   # When file is empty or killed early
         scf_convergence      = parse_scf_status(lines_last_opt_block)
@@ -93,7 +103,11 @@ class G16_output(object):
         if debug > 0: print(f"GET_LAST_BLOCK_STATUS: found scf={scf_convergence}, coord={coordinates}, frequencies={frequencies}, timelimit={time_limit}" )
 
         if   time_limit:                                  self.last_block_status = "time_stopped"
-        if   scf_convergence is None:                     self.last_block_status = "aborted"
+        elif scf_convergence is None:
+            self.last_block_status = "aborted"
+            # Retains usable optimization results preceding the unfinished SCF.
+            if self.comp_type in ['opt','ts'] and self.get_last_complete_block(debug=max(debug-1,0)) is not None:
+                self.last_block_status = "worked"
         elif not scf_convergence:                         self.last_block_status = "no_scf_convergence"
         elif scf_convergence:
             if not coordinates and not frequencies:       self.last_block_status = "no_coord"
@@ -112,7 +126,7 @@ class G16_output(object):
                 init_line = self.opt_blocks[idx][0]#+1
                 last_line = self.opt_blocks[idx][1]#+1
                 if debug > 0: print(f"GET_LAST_COMPLETE_BLOCK: evaluating block {idx}. Between {init_line} and {last_line}")
-                block_lines = self.lines[init_line:last_line]
+                block_lines = self.lines[init_line:last_line+1]
                 scf_convergence      = parse_scf_status(block_lines)
                 coordinates          = parse_coord_status(block_lines)
                 frequencies          = parse_freq_status(block_lines)
@@ -172,7 +186,7 @@ class G16_output(object):
         if len(self.opt_blocks) == 0: return None
         init_line = self.opt_blocks[-1][0]
         last_line = self.opt_blocks[-1][1]
-        return self.lines[init_line:last_line]
+        return self.lines[init_line:last_line+1]
     
 ##############
 ### GEOMS ###

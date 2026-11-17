@@ -98,6 +98,18 @@ class QE_output(object):
         return behavior
 
     def get_last_block_status(self, debug: int=0):
+        """Classifies available results independently of completion and convergence.
+
+        'worked' indicates usable results. For relax/vc-relax, an earlier
+        complete SCF/geometry block is sufficient when the final SCF is
+        unfinished. 'aborted' indicates incomplete output without usable
+        results for the calculation type. Explicit SCF failure remains
+        'no_scf_convergence'; other recognized stop conditions retain their
+        specific statuses.
+
+        get_status_finished() reports termination separately, and
+        get_optimization_finished() reports optimization convergence.
+        """
         lines_last_opt_block = self.get_lines_last_opt_block()
         if lines_last_opt_block is None: return "aborted"   # When file is empty or killed early
         scf_convergence      = parse_scf_status(lines_last_opt_block)
@@ -105,7 +117,11 @@ class QE_output(object):
         time_limit           = parse_timelimit_status(lines_last_opt_block)
 
         if   time_limit:              self.last_block_status = "time_stopped"
-        elif scf_convergence is None: self.last_block_status = "aborted"
+        elif scf_convergence is None:
+            self.last_block_status = "aborted"
+            # Retains usable optimization results preceding the unfinished SCF.
+            if self.comp_type in ['relax','vc-relax'] and self.get_last_complete_block(debug=max(debug-1,0)) is not None:
+                self.last_block_status = "worked"
         elif not scf_convergence:     self.last_block_status = "no_scf_convergence"
         elif scf_convergence: 
             if not coordinates and self.comp_type != 'scf':
