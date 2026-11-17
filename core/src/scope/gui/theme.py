@@ -75,9 +75,12 @@ def stylesheet(c: dict) -> str:
     QStatusBar {{ background: {c['window']}; color: {c['sub']}; }}
     QFrame#sidebar {{ background: {c['sidebar']}; }}
     QLabel#brand {{ color: {c['sidebar_text']}; font-size: 20px; font-weight: 700; }}
-    QLabel#localstatus {{ padding: 2px 0; }}
+    QFrame#statuscard {{ background: rgba(255,255,255,0.045); border: 1px solid rgba(255,255,255,0.08); border-radius: 8px; }}
+    QLabel#statusrow {{ padding: 5px 6px; border-radius: 5px; font-size: 12px; }}
+    QLabel#statusrow:hover {{ background: rgba(255,255,255,0.07); }}
+    QFrame#sidesep {{ background: rgba(255,255,255,0.08); border: none; margin: 0 14px; }}
     QLabel#brandsub {{ color: {c['sidebar_sub']}; font-size: 11px; }}
-    QPushButton#step {{ background: transparent; color: {c['sidebar_text']}; border: none; border-left: 3px solid transparent; border-radius: 0; text-align: left; padding: 11px 14px; }}
+    QPushButton#step {{ background: transparent; color: {c['sidebar_text']}; border: none; border-left: 3px solid transparent; border-radius: 0; text-align: left; padding: 9px 16px; }}
     QPushButton#step:hover {{ background: rgba(255,255,255,0.07); }}
     QPushButton#step:checked {{ background: rgba(255,255,255,0.12); border-left: 3px solid {c['accent']}; font-weight: 600; }}
     QPushButton#themebtn {{ background: transparent; color: {c['sidebar_sub']}; border: 1px solid {c['sidebar_sub']}; border-radius: 12px; padding: 4px 10px; }}
@@ -88,7 +91,7 @@ def stylesheet(c: dict) -> str:
     QLabel#pagetitle {{ font-size: 22px; font-weight: 700; color: {c['text']}; }}
     QLabel#pagesub {{ color: {c['sub']}; }}
     QLabel#sectiontitle {{ color: {c['text']}; font-weight: 700; padding-top: 8px; }}
-    QLabel#wslabel {{ color: {c['sidebar_sub']}; font-size: 11px; }}
+    QLabel#wslabel {{ color: {c['sidebar_sub']}; font-size: 10px; font-weight: 600; letter-spacing: 1px; }}
     QComboBox#wscombo {{ background: rgba(255,255,255,0.08); color: {c['sidebar_text']}; border: 1px solid rgba(255,255,255,0.18); border-radius: 6px; padding: 4px 8px; }}
     QPushButton#wsbtn::menu-indicator {{ image: none; width: 0px; }}
     QPushButton#wsbtn {{ background: transparent; color: {c['sidebar_text']}; border: 1px solid rgba(255,255,255,0.18); border-radius: 6px; padding: 3px 8px; }}

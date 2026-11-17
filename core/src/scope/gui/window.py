@@ -423,6 +423,12 @@ class Page(QWidget):
             nxt = QPushButton(f"Next: {STEPS[number][1]}  →"); nxt.setProperty("primary", True); nxt.clicked.connect(lambda: window.go(number)); foot.addWidget(nxt)
         lay = QVBoxLayout(self); lay.setContentsMargins(26, 20, 26, 16); lay.setSpacing(12); lay.addLayout(top); lay.addWidget(body, 1); lay.addLayout(foot)
 
+def status_row(glyph: str, colour: str, main: str, sub: str="") -> str:
+    """One line of the sidebar status card: a coloured sign, the state, and a quieter note on the right (rich text, never wrapped)."""
+    c = theme.colors(); sub = sub if len(sub) <= 18 else sub[:17] + "…"
+    return (f'<table width="100%" cellspacing="0" cellpadding="0"><tr><td width="18" style="color:{colour}; font-size:13px">{glyph}</td>'
+            f'<td style="color:{c["sidebar_text"]}; white-space:nowrap">{main}</td><td align="right" style="color:{c["sidebar_sub"]}; font-size:11px; white-space:nowrap">{sub}</td></tr></table>')
+
 class ClickLabel(QLabel):
     """A label that can be clicked."""
     clicked = Signal()
@@ -475,11 +481,13 @@ class MainWindow(QMainWindow):
         runs_sub = QLabel("Every run of every workspace, on this computer and on the clusters. Double-click a run to show it in its workspace."); runs_sub.setObjectName("pagesub"); runs_sub.setWordWrap(True)
         rl_.addWidget(runs_title); rl_.addWidget(runs_sub); rl_.addWidget(self.runs_page, 1); self.tabs.addWidget(runs_wrap)                 ## index len(STEPS) + 1 (the manual stays at len(STEPS))
 
-        side = QFrame(); side.setObjectName("sidebar"); side.setFixedWidth(240); sl = QVBoxLayout(side); sl.setContentsMargins(0, 18, 0, 14); sl.setSpacing(2)
+        side = QFrame(); side.setObjectName("sidebar"); side.setFixedWidth(240); sl = QVBoxLayout(side); sl.setContentsMargins(0, 22, 0, 16); sl.setSpacing(2)
         brand = QLabel("SCOPE"); brand.setObjectName("brand"); brandsub = QLabel("workflow assistant"); brandsub.setObjectName("brandsub")
-        self.local_label = ClickLabel(); self.local_label.setCursor(Qt.PointingHandCursor); self.local_label.setObjectName("localstatus"); self.local_label.setTextFormat(Qt.RichText); self.local_label.clicked.connect(self.show_local)
-        self.update_label = ClickLabel(); self.update_label.setCursor(Qt.PointingHandCursor); self.update_label.setObjectName("localstatus"); self.update_label.setTextFormat(Qt.RichText); self.update_label.clicked.connect(self.show_updates); self.update_label.hide()
-        bl = QVBoxLayout(); bl.setContentsMargins(18, 0, 0, 14); bl.setSpacing(0); bl.addWidget(brand); bl.addWidget(brandsub); bl.addSpacing(8); bl.addWidget(self.local_label); bl.addWidget(self.update_label); sl.addLayout(bl)
+        bl = QVBoxLayout(); bl.setContentsMargins(18, 0, 18, 0); bl.setSpacing(0); bl.addWidget(brand); bl.addWidget(brandsub); sl.addLayout(bl); sl.addSpacing(14)
+        self.local_label = ClickLabel(); self.local_label.setCursor(Qt.PointingHandCursor); self.local_label.setObjectName("statusrow"); self.local_label.setTextFormat(Qt.RichText); self.local_label.clicked.connect(self.show_local)
+        self.update_label = ClickLabel(); self.update_label.setCursor(Qt.PointingHandCursor); self.update_label.setObjectName("statusrow"); self.update_label.setTextFormat(Qt.RichText); self.update_label.clicked.connect(self.show_updates); self.update_label.hide()
+        card = QFrame(); card.setObjectName("statuscard"); cl = QVBoxLayout(card); cl.setContentsMargins(6, 6, 6, 6); cl.setSpacing(0); cl.addWidget(self.local_label); cl.addWidget(self.update_label)
+        cw = QHBoxLayout(); cw.setContentsMargins(14, 0, 14, 0); cw.addWidget(card); sl.addLayout(cw); sl.addSpacing(20)
         ws_label = QLabel("WORKSPACE"); ws_label.setObjectName("wslabel")
         self.ws_combo = QComboBox(); self.ws_combo.setObjectName("wscombo"); self.ws_combo.setToolTip("The project shown: its environment, input files and project on the cluster. Runs keep going whichever workspace is shown.")
         self.ws_combo.setMinimumContentsLength(8); self.ws_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
@@ -487,11 +495,14 @@ class MainWindow(QMainWindow):
         self.ws_menu_btn = QPushButton("⋯"); self.ws_menu_btn.setObjectName("wsbtn"); self.ws_menu_btn.setFixedWidth(28); self.ws_menu_btn.setToolTip("Rename or delete this workspace")
         ws_menu = QMenu(self); ws_menu.addAction("Rename this workspace…", self.rename_workspace); ws_menu.addAction("Delete this workspace…", self.delete_workspace); ws_menu.addSeparator()
         ws_menu.addAction("Export this workspace…", self.export_workspace); ws_menu.addAction("Import a workspace…", self.import_workspace); self.ws_menu_btn.setMenu(ws_menu)
-        wl = QVBoxLayout(); wl.setContentsMargins(14, 0, 14, 12); wl.setSpacing(4); wl.addWidget(ws_label); wr = QHBoxLayout(); wr.setSpacing(4); wr.addWidget(self.ws_combo, 1); wr.addWidget(self.ws_new_btn); wr.addWidget(self.ws_menu_btn); wl.addLayout(wr); sl.addLayout(wl)
+        wl = QVBoxLayout(); wl.setContentsMargins(14, 0, 14, 14); wl.setSpacing(6); wl.addWidget(ws_label); wr = QHBoxLayout(); wr.setSpacing(4); wr.addWidget(self.ws_combo, 1); wr.addWidget(self.ws_new_btn); wr.addWidget(self.ws_menu_btn); wl.addLayout(wr); sl.addLayout(wl)
+        def separator() -> QFrame:
+            line = QFrame(); line.setObjectName("sidesep"); line.setFixedHeight(1); return line
+        sl.addWidget(separator()); sl.addSpacing(8)
         self.group, self.step_buttons = QButtonGroup(self), []
         for i, (key, title, _, _) in enumerate(STEPS):
             b = QPushButton(); b.setObjectName("step"); b.setCheckable(True); b.setCursor(Qt.PointingHandCursor); b.clicked.connect(lambda _=False, i=i: self.go(i)); self.group.addButton(b, i); self.step_buttons.append(b); sl.addWidget(b)
-        sl.addSpacing(10)
+        sl.addSpacing(8); sl.addWidget(separator()); sl.addSpacing(8)
         self.runs_btn = QPushButton("▶   Runs"); self.runs_btn.setObjectName("step"); self.runs_btn.setCheckable(True); self.runs_btn.setCursor(Qt.PointingHandCursor); self.runs_btn.setToolTip("Every run of every workspace, here and on the clusters")
         self.runs_btn.clicked.connect(lambda: self.go(len(STEPS) + 1)); self.group.addButton(self.runs_btn, len(STEPS) + 1); sl.addWidget(self.runs_btn)
         self.manual_btn = QPushButton("?   Manual"); self.manual_btn.setObjectName("step"); self.manual_btn.setCheckable(True); self.manual_btn.setCursor(Qt.PointingHandCursor); self.manual_btn.clicked.connect(lambda: self.open_manual()); self.group.addButton(self.manual_btn, len(STEPS)); sl.addWidget(self.manual_btn)
@@ -515,7 +526,7 @@ class MainWindow(QMainWindow):
     def check_local(self) -> None:
         """Asks, in a worker thread, whether SCOPE can run from this computer (the same question every run depends on). The version shown is read from the installation each time."""
         if self.local_task is not None: return
-        self.local_label.setText(f'<span style="color:{theme.colors()["sidebar_sub"]}">●&nbsp; checking SCOPE…</span>')
+        self.local_label.setText(status_row("●", theme.colors()["sidebar_sub"], "SCOPE", "checking…"))
         task = Task(backend.detect_local_scope); self.local_task = task
         task.signals.done.connect(self.local_done); task.signals.failed.connect(lambda m: self.local_done(backend.LocalScope(probe_error=m)))
         QThreadPool.globalInstance().start(task)
@@ -529,8 +540,7 @@ class MainWindow(QMainWindow):
         c = theme.colors(); info = self.local; colour = {"green": c["ok"], "amber": c["warn"], "red": c["err"]}[info.state] if (info.runs_ok or info.probe_error or info.python) else c["sidebar_sub"]
         if not (info.python or info.probe_error): return                                   # still checking
         word = "active" if info.runs_ok else ("not installed" if not info.probe_error else "check failed")
-        version = f"&nbsp; v{info.scope_version}" if info.scope_version else ""
-        self.local_label.setText(f'<span style="color:{colour}; font-size:15px">●</span>&nbsp; <span style="color:{c["sidebar_text"]}">SCOPE {word}</span><span style="color:{c["sidebar_sub"]}">{version}</span>')
+        self.local_label.setText(status_row("●", colour, f"SCOPE v{info.scope_version}" if info.scope_version else "SCOPE", word))
         self.local_label.setToolTip("Click for details.\n" + "\n".join(f"{name}: {detail}" for s, name, detail in info.report()[:3]))
 
     def show_local(self) -> None:
@@ -545,7 +555,7 @@ class MainWindow(QMainWindow):
     def check_updates(self, fetch: bool=False) -> None:
         """Compares this copy of SCOPE with GitHub in a worker thread: with fetch=True GitHub is asked (network), otherwise only what the last check brought is used."""
         if self.update_task is not None: return
-        if fetch: self.update_label.setText(f'<span style="color:{theme.colors()["sidebar_sub"]}">↻&nbsp; checking for updates…</span>'); self.update_label.show()
+        if fetch: self.update_label.setText(status_row("↻", theme.colors()["sidebar_sub"], "Updates", "checking…")); self.update_label.show()
         repo = self.update_repo
         task = Task(lambda: updates.status(repo, fetch=fetch)); self.update_task = task
         task.signals.done.connect(self.updates_done); task.signals.failed.connect(lambda m: self.updates_done(updates.UpdateStatus(repo=repo or "", error=m)))
@@ -562,12 +572,17 @@ class MainWindow(QMainWindow):
         if self.update_task is not None and st is None: return
         if st is None or not st.repo: self.update_label.hide(); return
         kind, text = st.summary(); enabled = updates.setting().get("enabled")
-        if self.updated: kind, text = "new", "Updated: restart to use it"
-        elif enabled is None and kind != "new": kind, text = "ask", "Check for SCOPE updates?"
-        elif enabled is False and kind == "info": text += " · daily check off"
+        t = st.followed() or next((x for x in st.targets if x.exists), None); ref = t.ref if t else ""
+        if self.updated:                          kind, main, sub = "new", "Restart to update", ""
+        elif enabled is None and kind != "new":   kind, main, sub = "ask", "Check for updates?", ""
+        elif kind == "new":                       main, sub = f"{t.behind} update{'s' if t.behind > 1 else ''}", ref
+        elif kind == "warn":                      main, sub = "Update check failed", ""
+        elif text.startswith("Up to date"):       main, sub = "Up to date", ref
+        else:                                     main, sub = text, ""
         colour = {"new": c["accent"], "ask": c["accent"], "warn": c["warn"]}.get(kind, c["sidebar_sub"]); glyph = {"new": "↑", "warn": "!"}.get(kind, "↻")
-        self.update_label.setText(f'<span style="color:{colour}">{glyph}&nbsp; {text}</span>'); self.update_label.show()
-        self.update_label.setToolTip("Click for details: what is new on GitHub, the daily check, and Update.")
+        self.update_label.setText(status_row(glyph, colour, main, sub)); self.update_label.show()
+        tip = {None: "The window does not contact GitHub until you allow it.", False: "The daily check is off: click to check now or turn it on.", True: "Checked once a day."}[enabled]
+        self.update_label.setToolTip(f"{text}. {tip}\nClick for details: what is new on GitHub, the daily check, and Update.")
 
     def show_updates(self) -> None:
         from scope.gui.update_view import UpdatesDialog

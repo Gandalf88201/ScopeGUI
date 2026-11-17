@@ -102,7 +102,7 @@ def test_sidebar_shows_light_and_installed_version(monkeypatch):
     qapp.processEvents()
     import scope
     text = win.local_label.text()
-    assert "SCOPE active" in text and f"v{scope.__version__}" in text and "●" in text
+    assert f"SCOPE v{scope.__version__}" in text and ">active<" in text and "●" in text
     assert win.local.state == "green" and "Click for details" in win.local_label.toolTip()
     opened = []
     monkeypatch.setattr(QDialog, "exec", lambda self: opened.append(self.text.toPlainText()) or 0)

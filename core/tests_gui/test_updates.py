@@ -134,18 +134,18 @@ def test_the_window_asks_first_then_checks_updates_and_restarts(repos, monkeypat
     win = MainWindow(); assert wait(app, lambda: win.update_task is None)
     assert fetches == [False]                                                                            # GitHub is not asked before the user allows it
     win.update_repo = mine; win.check_updates(); assert wait(app, lambda: win.update_task is None)
-    assert "Check for SCOPE updates?" in win.update_label.text() and not win.update_label.isHidden()
+    assert "Check for updates?" in win.update_label.text() and not win.update_label.isHidden() and "until you allow it" in win.update_label.toolTip()
     d = UpdatesDialog(win, win); assert not d.auto.isChecked() and "This copy" in d.head.text(); d.accept()
-    assert updates.setting()["enabled"] is False and "daily check off" in win.update_label.text()       # closing without ticking answers "no"
+    assert updates.setting()["enabled"] is False and "Up to date" in win.update_label.text() and "daily check is off" in win.update_label.toolTip()       # closing without ticking answers "no"
     push_new(colleague, 2)
     d = UpdatesDialog(win, win); d.auto.setChecked(True)                                                 # allowed: the daily check is due at once
     assert wait(app, lambda: win.update_task is None and win.update_status.fetched)
-    assert fetches[-1] is True and "2 updates on origin/main" in win.update_label.text() and updates.setting()["last"] > 0
+    assert fetches[-1] is True and "2 updates" in win.update_label.text() and "origin/main" in win.update_label.text() and updates.setting()["last"] > 0
     assert d.update_btn.isEnabled() and "new code 1" in d.log.toPlainText()
     monkeypatch.setattr(QMessageBox, "question", staticmethod(lambda *a, **k: QMessageBox.Yes))
     d.apply(); assert wait(app, lambda: win.updated and win.update_task is None)
     assert os.path.exists(os.path.join(mine, "core/src/a.py")) and d.restart_btn.isVisibleTo(d) and not d.update_btn.isEnabled() and "by 2 commit(s)" in d.message.text()
-    assert "restart" in win.update_label.text()
+    assert "Restart to update" in win.update_label.text()
     started = []; monkeypatch.setattr(QProcess, "startDetached", staticmethod(lambda *a: started.append(a) or True))
     d.reject(); win.show(); win.restart()
     assert started and started[0][1][-1] == "gui" and not win.isVisible()
