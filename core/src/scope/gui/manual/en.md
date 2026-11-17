@@ -32,6 +32,12 @@ The version is read from the installation each time, never stored, so it follows
 4. **Run**: choose the system and press *Run*.
 5. **Cluster** (optional): add your cluster, press *Test connection*, then upload, run and download.
 
+### Starting the GUI, and the private environment
+
+Start it with `scope gui`. You do not need to prepare a virtual environment for the interface: if PySide6 (the library that draws the window) is not installed, the first start creates a private virtual environment by itself in the SCOPE data folder, installs PySide6 there (internet needed, about a minute) and opens the window from it. SCOPE itself is not installed twice: the private environment reads the SCOPE you already have. Later starts reuse it and are as fast as any other start. It is rebuilt only if SCOPE moves to another Python.
+
+Useful options: `scope gui --check` builds the window, prints one line with the Python and PySide6 versions and exits (to test an installation); `scope gui --reset-env` deletes the private environment. Set `SCOPE_GUI_NO_ENV=1` if you prefer to manage PySide6 yourself (`pip install 'scope-qc[gui]'`).
+
 ## How SCOPE thinks
 
 | Word | Meaning |
@@ -241,6 +247,7 @@ Things worth knowing:
 |---|---|---|
 | The light under SCOPE is red | SCOPE cannot be imported by the Python that runs this window | Click the light, copy the installation commands, install SCOPE in that environment and press *Check again* |
 | I closed the window (or it crashed) during a run | Nothing is lost: runs are independent of the window | Open the window again: it finds the run. On the Cluster page press *Watch runs* |
+| `scope gui` stops at the first start with a pip error | The private environment could not download PySide6 (no internet, proxy, or a very new Python without wheels) | Check the connection and run `scope gui` again; or install by hand: `pip install 'scope-qc[gui]'` |
 | The window did not appear | On macOS a window started from a terminal can open behind other apps | Press Cmd+Tab and choose *Python* |
 | A job never starts and SCOPE says `requisites NOT met` | The job lists itself, or a job that never finishes, as a requisite | Edit the input; requisites are jobs that must finish **before** this one |
 | `scope run` stops with `EOFError` | An input names a queue that only partly matches (`shor` for `short`), and SCOPE asks a question that cannot be answered here | Use the exact queue name |

@@ -548,11 +548,15 @@ class MainWindow(QMainWindow):
         self.run_tab.timer.stop(); self.remote_tab.stop_watching()
         event.accept()
 
-def main(env_path: str=None) -> int:
-    """Starts the GUI and returns the exit code of the Qt event loop."""
+def main(env_path: str=None, check: bool=False) -> int:
+    """Starts the GUI and returns the exit code of the Qt event loop. With check=True the window is built, one line is printed and the function returns 0 (no event loop)."""
     app = QApplication.instance() or QApplication(sys.argv)
     app.setApplicationName("SCOPE")
-    win = MainWindow(env_path); win.show()
+    win = MainWindow(env_path)
+    if check:
+        import PySide6
+        print(f"SCOPE GUI OK  python={sys.executable}  PySide6={PySide6.__version__}", flush=True); return 0
+    win.show()
     win.raise_(); win.activateWindow()                                ## a GUI started from a terminal on macOS otherwise opens behind the other applications
     print("SCOPE GUI started. If you do not see the window, look for 'Python' in the Dock or press Cmd+Tab.", flush=True)
     return app.exec()
