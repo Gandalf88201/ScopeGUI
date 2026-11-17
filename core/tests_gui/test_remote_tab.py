@@ -40,7 +40,7 @@ def test_cluster_page_end_to_end(cluster, local, tmp_path, monkeypatch):
     tab.upload(preview=False); wait(app, tab)
     assert asked and os.path.isfile(os.path.join(cluster.remote_root, "Systems", "water", "water.npy")) and os.path.isfile(os.path.join(cluster.remote_root, "inputs", "opt.scope"))
     # run on the cluster
-    tab.run_remote(); wait(app, tab)
+    tab.poll_ms = 100; tab.run_remote(); wait(app, tab)
     assert "MANUAL ATTENTION" in tab.log.toPlainText() and "exit code 0" in tab.status.text() and win.step_done("run")
     assert os.path.isdir(os.path.join(cluster.remote_root, "Computations", "water", "demo"))
     # download warns that the system file is replaced

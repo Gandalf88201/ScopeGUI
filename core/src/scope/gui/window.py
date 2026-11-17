@@ -1,12 +1,12 @@
 """Qt window of the SCOPE GUI: a left bar of five steps (Environment, Systems, Pipeline, Run, Cluster) plus a manual.
 
-Requires PySide6. Heavy work is never done in the window thread: `scope run` is started as a QProcess (its own
-process, stdin closed, TERM and unbuffered output set), and everything else is quick folder or file reading.
+Requires PySide6. Heavy work is never done in the window thread. `scope run` is started detached (its own session, no pipe to the
+window, output in a log file), so closing or crashing the window does not stop it; the window follows the log and finds a run again when reopened.
 """
 import os
 import sys
 import time
-from PySide6.QtCore    import Qt, QObject, QProcess, QProcessEnvironment, QThreadPool, Signal
+from PySide6.QtCore    import Qt, QObject, QThreadPool, QTimer, Signal
 from PySide6.QtGui     import QBrush, QColor, QGuiApplication, QPainter, QPalette, QPen, QPolygonF
 from PySide6.QtCore    import QPointF
 from PySide6.QtWidgets import (QApplication, QButtonGroup, QCheckBox, QDialog, QFrame, QScrollArea, QStackedWidget, QComboBox, QFileDialog, QFormLayout, QGraphicsScene, QGraphicsView, QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMessageBox,
@@ -293,7 +293,8 @@ class RunTab(QWidget):
     def __init__(self, session: Session):
         super().__init__()
         self.session = session
-        self.proc    = None
+        self.record, self.offset = None, 0
+        self.timer   = QTimer(self); self.timer.timeout.connect(self.tick)
         self.system  = QComboBox()
         self.quiet, self.verbose, self.errors = QCheckBox("quiet (-q)"), QCheckBox("verbose (-v)"), QCheckBox("handle errors (-e)")
         self.warning = QLabel(); self.warning.setWordWrap(True); set_kind(self.warning, "err")
@@ -317,35 +318,51 @@ class RunTab(QWidget):
         valid = [r for r in s.reports if r.ok]
         if not s.info or not self.system.currentText() or not valid:
             QMessageBox.information(self, "Nothing to run", "Choose an environment, a system and at least one valid input file."); return
+        if self.running(): QMessageBox.information(self, "A run is in progress", "Wait for the current run to end, or stop it first: two runs on one system can overwrite each other's results."); return
         warning = backend.submission_warning(s.info, valid)
         if warning and QMessageBox.question(self, "Jobs will be submitted", warning + "\n\nContinue?") != QMessageBox.Yes: return
-        program, args = backend.build_run_command(s.info.filepath, self.system.currentText(), [r.path for r in valid], self.quiet.isChecked(), self.verbose.isChecked(), self.errors.isChecked())
-        self.log.clear(); self.log.appendPlainText("$ scope " + " ".join(args[2:]) + "\n")
-        self.proc = QProcess(self)
-        env = QProcessEnvironment(); [env.insert(k, v) for k, v in backend.child_environment().items()]
-        self.proc.setProcessEnvironment(env); self.proc.setProcessChannelMode(QProcess.MergedChannels)
-        self.proc.readyReadStandardOutput.connect(self.read); self.proc.finished.connect(self.finished); self.proc.errorOccurred.connect(self.failed)
-        self.proc.start(program, args); self.proc.closeWriteChannel()      ## stdin closed: a Y/N question inside SCOPE fails instead of hanging
+        record = backend.start_detached_local(s.info.filepath, self.system.currentText(), [r.path for r in valid], self.quiet.isChecked(), self.verbose.isChecked(), self.errors.isChecked())
+        self.attach(record)
+
+    ##### following a run: the run itself lives outside this window #####
+    def attach(self, record: dict, note: str="") -> None:
+        """Starts following a run (new, or found again when the window was reopened) by reading its log file."""
+        self.record, self.offset = record, 0
+        import time as _t
+        self.log.clear(); self.log.appendPlainText(f"$ {record['command']}   (started {_t.strftime('%H:%M:%S', _t.localtime(record['started']))})\n" + (note + "\n" if note else "") + "This run keeps going if you close this window.\n")
         self.run_btn.setEnabled(False); self.stop_btn.setEnabled(True); self.status.setText("Running…")
+        self.timer.start(400); self.tick()
 
-    def read(self) -> None:
-        self.log.appendPlainText(bytes(self.proc.readAllStandardOutput()).decode("utf-8", errors="replace").rstrip("\n"))
+    def tick(self) -> None:
+        if not self.record: return
+        text, self.offset = backend.read_log(self.record["log"], self.offset)
+        if text.strip("\n"): self.log.appendPlainText(text.rstrip("\n"))
+        state, code = backend.run_state(self.record)
+        if state != "running": self.finish(state, code)
 
-    def finished(self, code: int, status) -> None:
-        self.read()
+    def finish(self, state: str, code: "int | None") -> None:
+        self.timer.stop(); text, self.offset = backend.read_log(self.record["log"], self.offset)
+        if text.strip("\n"): self.log.appendPlainText(text.rstrip("\n"))
         self.run_btn.setEnabled(True); self.stop_btn.setEnabled(False)
-        self.status.setText(f"Finished with exit code {code}" if status == QProcess.NormalExit else "Process crashed or was stopped")
-        if status == QProcess.NormalExit and code == 0: self.session.mark("ran")
+        backend.mark_seen(self.record["id"])
+        if state == "finished": self.status.setText(f"Finished with exit code {code}")
+        else: self.status.setText("The run ended without finishing (it was stopped or killed, or the computer restarted). Press Run again: SCOPE continues where it stopped.")
+        if state == "finished" and code == 0: self.session.mark("ran")
         self.session.systemsChanged.emit()
 
-    def failed(self, error) -> None:
-        if error == QProcess.FailedToStart: self.status.setText("Could not start the process"); self.run_btn.setEnabled(True); self.stop_btn.setEnabled(False)
+    def reattach(self) -> None:
+        """When the window opens: follow the latest run started from the GUI that is still running, or show the end of one that finished while the window was closed."""
+        for record in reversed(backend.load_runs()):
+            if record.get("kind") != "local" or record.get("seen"): continue
+            state, code = backend.run_state(record)
+            self.attach(record, note="Found again: this run was started before the window was (re)opened." + ("" if state == "running" else " It ended while the window was closed."))
+            return
 
     def stop(self) -> None:
-        if self.proc and self.proc.state() != QProcess.NotRunning: self.proc.terminate()
+        if self.record and backend.stop_run(self.record): self.status.setText("Stopping…")
 
     def running(self) -> bool:
-        return bool(self.proc and self.proc.state() != QProcess.NotRunning)
+        return bool(self.record and self.timer.isActive())
 
 ###################
 ### Main window ###
@@ -439,6 +456,7 @@ class MainWindow(QMainWindow):
         self.go(0); self.update_steps()
         path = env_path or backend.load_gui_config().get("last_env")
         if path and os.path.isfile(path): self.env_tab.load(path) if env_path else self.try_last(path)
+        self.run_tab.reattach()
 
     def check_local(self) -> None:
         """Asks, in a worker thread, whether SCOPE can run from this computer (the same question every run depends on). The version shown is read from the installation each time."""
@@ -513,11 +531,21 @@ class MainWindow(QMainWindow):
         except Exception: return
         self.session.set_environment(env, info)
 
+    def close_choice(self) -> str:
+        """Asks what to do with an active run when the window is closed: 'keep' (default), 'stop' or 'cancel'."""
+        box = QMessageBox(self); box.setWindowTitle("A run is in progress"); box.setIcon(QMessageBox.Question)
+        box.setText("A scope run is still active.\n\nIt keeps running on its own if you close this window. When you open the window again it finds the run and shows its log.")
+        keep = box.addButton("Close, keep it running", QMessageBox.AcceptRole); stop = box.addButton("Stop it and close", QMessageBox.DestructiveRole); box.addButton(QMessageBox.Cancel)
+        box.exec(); chosen = box.clickedButton()
+        return "keep" if chosen is keep else ("stop" if chosen is stop else "cancel")
+
     def closeEvent(self, event) -> None:
-        active = [t for t in (self.run_tab, self.remote_tab) if t.running()]
-        if active:
-            if QMessageBox.question(self, "Run in progress", "A scope run is still active. Stop it and close?") != QMessageBox.Yes: event.ignore(); return
-            for t in active: t.proc.kill(); t.proc.waitForFinished(3000)
+        """Closing the window never stops a run by itself: runs live outside it. If one is active the user chooses to leave it running (default) or to stop it."""
+        if self.run_tab.running():
+            choice = self.close_choice()
+            if choice == "stop": self.run_tab.stop()
+            elif choice != "keep": event.ignore(); return
+        self.run_tab.timer.stop(); self.remote_tab.stop_watching()
         event.accept()
 
 def main(env_path: str=None) -> int:

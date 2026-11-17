@@ -371,3 +371,82 @@ def run_script_text(p: Profile, system: str, remote_inputs: list, quiet: bool=Fa
     if set_path: lines.append(f"{scope} set_path -n {env} -s {s}")
     lines.append(f"{scope} run -n {env} -s {s} -i " + " ".join(shell_path(i) for i in remote_inputs) + (f" {flags}" if flags else ""))
     return "\n".join(lines) + "\n"
+
+
+############################################
+### Runs on the cluster that outlive us ###
+############################################
+STARTED, BUSY, SIZE, ALIVE, BEGIN, RUNLINE = "__SCOPE_GUI_STARTED__", "__SCOPE_GUI_BUSY__", "__SCOPE_GUI_SIZE__", "__SCOPE_GUI_ALIVE__", "__SCOPE_GUI_BEGIN__", "__SCOPE_GUI_RUN__"
+
+def _logs(p: Profile) -> str:
+    return f"ROOT={shell_path(p.remote_root.rstrip('/'))}"
+
+def detached_run_script(p: Profile, system: str, remote_inputs: list, quiet: bool=False, verbose: bool=False, errors: bool=False, set_path: bool=True, stamp: str="") -> str:
+    """Starts `scope run` on the cluster so that it does not depend on this window or on the SSH connection.
+
+    The run is started with nohup (and setsid where it exists), reads no input, and writes to <project>/logs/run_<system>_<time>.log;
+    its pid is kept in <project>/logs/run_<system>.pid, which also keeps a second run of the same system from starting. When it ends
+    it appends `__SCOPE_GUI_EXIT__ <code>` to the log and removes the pid file. If the connection drops, the run goes on.
+    Prints `__SCOPE_GUI_STARTED__ <pid> <log>`, or `__SCOPE_GUI_BUSY__ <pid>` if a run of that system is still active.
+    """
+    import time
+    s = shlex.quote(system); stamp = stamp or time.strftime("%Y%m%d_%H%M%S")
+    inner = run_script_text(p, system, remote_inputs, quiet, verbose, errors, set_path)
+    lines = ["set -e", _logs(p), 'mkdir -p "$ROOT"/logs', f'PIDF="$ROOT"/logs/run_{system}.pid' if backend.SAFE_NAME.match(system) else f'PIDF="$ROOT"/logs/run_$(printf %s {s} | tr -c "A-Za-z0-9._-" _).pid',
+             'if [ -f "$PIDF" ] && kill -0 "$(cat "$PIDF")" 2>/dev/null; then echo "' + BUSY + ' $(cat "$PIDF")"; exit 0; fi',
+             f'LOG="$ROOT"/logs/run_{system}_{stamp}.log' if backend.SAFE_NAME.match(system) else f'LOG="$ROOT"/logs/run_x_{stamp}.log',
+             'cat > "$LOG".sh <<\'SCOPE_GUI_RUN_BODY\'', inner.rstrip("\n"), "SCOPE_GUI_RUN_BODY",
+             'SETSID=""; command -v setsid >/dev/null 2>&1 && SETSID=setsid',
+             'nohup $SETSID bash -c \'bash "$1" > "$2" 2>&1 < /dev/null; echo "' + EXIT_MARKER_REMOTE + ' $?" >> "$2"; rm -f "$3"\' _ "$LOG".sh "$LOG" "$PIDF" > /dev/null 2>&1 < /dev/null &',
+             'echo $! > "$PIDF"', 'echo "' + STARTED + ' $! $LOG"']
+    return "\n".join(lines) + "\n"
+
+EXIT_MARKER_REMOTE = backend.EXIT_MARKER
+
+def parse_started(stdout: str) -> dict:
+    """{'state': 'started', 'pid': ..., 'log': ...}, {'state': 'busy', 'pid': ...} or {} when the script printed neither."""
+    for line in stdout.splitlines():
+        if line.startswith(STARTED):
+            parts = line.split(None, 2)
+            if len(parts) == 3: return {"state": "started", "pid": parts[1], "log": parts[2].strip()}
+        if line.startswith(BUSY): return {"state": "busy", "pid": line.split()[-1]}
+    return {}
+
+def poll_script(p: Profile, system: str, log: str, offset: int) -> str:
+    """Reads what a cluster run appended to its log after `offset` bytes, and whether it is still alive. Read-only."""
+    pidname = system if backend.SAFE_NAME.match(system) else ""
+    return "\n".join([_logs(p), f'LOG={shell_path(log)}', f'PIDF="$ROOT"/logs/run_{pidname}.pid',
+                      f'echo "{SIZE} $(wc -c < "$LOG" 2>/dev/null || echo 0)"',
+                      f'if [ -f "$PIDF" ] && kill -0 "$(cat "$PIDF")" 2>/dev/null; then echo "{ALIVE} 1"; else echo "{ALIVE} 0"; fi',
+                      f'echo "{BEGIN}"', f'tail -c +{int(offset) + 1} "$LOG" 2>/dev/null || true']) + "\n"
+
+def parse_poll(stdout: str) -> dict:
+    """Splits the answer of poll_script into {'alive': bool, 'text': new log text without the end marker, 'bytes': how many bytes of log were read, 'exit': code or None}."""
+    head, _, body = stdout.partition(BEGIN + "\n")
+    alive = ALIVE + " 1" in head; code = None; keep = []
+    for line in body.split("\n"):
+        if line.startswith(backend.EXIT_MARKER):
+            try: code = int(line.split()[1])
+            except (IndexError, ValueError): code = -1
+        else: keep.append(line)
+    return {"alive": alive, "text": "\n".join(keep), "bytes": len(body.encode("utf-8")), "exit": code}
+
+def stop_script(p: Profile, system: str) -> str:
+    """Asks the cluster run of a system to end (its whole process group where there is one)."""
+    return "\n".join([_logs(p), f'PIDF="$ROOT"/logs/run_{system}.pid', 'if [ -f "$PIDF" ]; then PID=$(cat "$PIDF"); kill -TERM -- -"$PID" 2>/dev/null || kill -TERM "$PID" 2>/dev/null; echo stopped; else echo "no run"; fi']) + "\n"
+
+def list_runs_script(p: Profile) -> str:
+    """Lists the runs of this project that are active, and the most recent logs, so a window opened later can find them. Read-only."""
+    return "\n".join([_logs(p), 'for f in "$ROOT"/logs/run_*.pid; do [ -f "$f" ] || continue; PID=$(cat "$f"); n=$(basename "$f" .pid); n=${n#run_}',
+                      'if kill -0 "$PID" 2>/dev/null; then A=1; else A=0; fi; L=$(ls -t "$ROOT"/logs/run_"$n"_*.log 2>/dev/null | head -1)',
+                      f'echo "{RUNLINE} $n $PID $A $L"; done', f'for f in $(ls -t "$ROOT"/logs/run_*_*.log 2>/dev/null | head -5); do echo "__SCOPE_GUI_LOG__ $f"; done']) + "\n"
+
+def parse_runs(stdout: str) -> dict:
+    """{'active': [(system, pid, log)], 'logs': [paths, newest first]}"""
+    active, logs = [], []
+    for line in stdout.splitlines():
+        if line.startswith(RUNLINE):
+            parts = line.split()
+            if len(parts) >= 5 and parts[3] == "1": active.append((parts[1], parts[2], parts[4]))
+        elif line.startswith("__SCOPE_GUI_LOG__"): logs.append(line.split(None, 1)[1].strip())
+    return {"active": active, "logs": logs}

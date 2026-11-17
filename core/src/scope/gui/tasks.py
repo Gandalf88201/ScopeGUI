@@ -12,5 +12,11 @@ class Task(QRunnable):
         super().__init__(); self.fn, self.signals = fn, Signals()
     def run(self) -> None:
         try: res = self.fn()
-        except Exception as exc: self.signals.failed.emit(f"{type(exc).__name__}: {exc}")
-        else: self.signals.done.emit(res)
+        except Exception as exc: self._send(self.signals.failed, f"{type(exc).__name__}: {exc}")
+        else: self._send(self.signals.done, res)
+
+    @staticmethod
+    def _send(signal, value) -> None:
+        """Emits a result; if the window was closed while the task ran, the receiver is gone and the result is dropped."""
+        try: signal.emit(value)
+        except RuntimeError: pass

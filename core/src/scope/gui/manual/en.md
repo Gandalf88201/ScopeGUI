@@ -98,11 +98,13 @@ Choose a **system**, then press **Run**. The log shows what SCOPE does, live. At
 
 - *quiet* prints less, *verbose* prints more.
 - *handle errors* lets SCOPE retry some common failures by itself.
-- **Stop** asks the process to end.
+- **Stop** asks the run to end (SCOPE continues where it stopped the next time you run).
 
 If the environment has a scheduler and an input has *Submit* on, the Run button asks for confirmation first, because it sends real jobs and uses computing time.
 
 On a local environment you will see `No Queue Management has been detected in cluster, disabling submission`. That is expected: nothing is submitted and no inputs are written.
+
+**A run does not depend on this window.** It is started on its own, writes its output to a log file, and keeps going if you close the window, if the window crashes, or if you press Ctrl-C in the Terminal where you started the window. When you close the window during a run it asks whether to leave the run going (the default) or stop it. When you open the window again it finds the run, shows its log, and tells you if it ended while the window was closed. The logs are in the `gui_runs` folder next to the SCOPE settings (see the details of the SCOPE light).
 
 Run again later to advance the pipeline. Two runs on the same system at the same time can overwrite each other's results: wait for one to finish.
 
@@ -176,6 +178,8 @@ The lights are a snapshot. They change only when you press Test connection again
 
 - **Preview upload** lists what would be copied (nothing is copied). **Upload** copies the selected system and the input files. Generated calculation files are never uploaded: SCOPE writes them on the cluster.
 - **Run on the cluster** starts `scope run` there and shows the log here. SCOPE first runs `scope set_path` so that the paths stored in the system match the cluster folders. It asks you to confirm, and says whether input files will submit jobs.
+- **The run is detached.** It is started on the cluster with its own log and process (in `<project>/logs/`), so it keeps going if you close this window, if the window crashes, or if the connection drops. Jobs already handed to the scheduler are never affected by the window. A second run of the same system is refused while one is active, because two runs can overwrite each other's results.
+- **Watch runs** finds a run that is active on the cluster, for example one started before the window was closed, and follows its log. After a passed connection test the window also tells you if a run is active. **Stop watching** only stops following; the run goes on. **Stop the run** asks the cluster to end it (jobs already submitted are not cancelled).
 - **Preview download** / **Download** bring results back. Large files (wavefunctions, scratch, checkpoints) are skipped by default. A download can replace the local system file: look at the preview first.
 
 ## Local and cluster: what works where
@@ -236,6 +240,7 @@ Things worth knowing:
 | What you see | Why | What to do |
 |---|---|---|
 | The light under SCOPE is red | SCOPE cannot be imported by the Python that runs this window | Click the light, copy the installation commands, install SCOPE in that environment and press *Check again* |
+| I closed the window (or it crashed) during a run | Nothing is lost: runs are independent of the window | Open the window again: it finds the run. On the Cluster page press *Watch runs* |
 | The window did not appear | On macOS a window started from a terminal can open behind other apps | Press Cmd+Tab and choose *Python* |
 | A job never starts and SCOPE says `requisites NOT met` | The job lists itself, or a job that never finishes, as a requisite | Edit the input; requisites are jobs that must finish **before** this one |
 | `scope run` stops with `EOFError` | An input names a queue that only partly matches (`shor` for `short`), and SCOPE asks a question that cannot be answered here | Use the exact queue name |

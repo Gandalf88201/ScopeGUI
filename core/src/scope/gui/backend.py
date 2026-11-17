@@ -586,3 +586,97 @@ def detect_local_scope(python: str=None, timeout: int=60) -> LocalScope:
         info.scope_version, info.scope_file = data["scope_version"], data["scope_file"]
         info.editable = "site-packages" not in info.scope_file and "dist-packages" not in info.scope_file
     return info
+
+
+###################################
+### Runs that outlive the window ###
+###################################
+EXIT_MARKER = "__SCOPE_GUI_EXIT__"
+WRAPPER     = 'log="$1"; shift; "$@" > "$log" 2>&1 < /dev/null; code=$?; echo "__SCOPE_GUI_EXIT__ $code" >> "$log"'
+
+def runs_dir() -> str:
+    """Folder with the logs and the records of runs started from the GUI (next to the GUI preferences)."""
+    from platformdirs import user_config_dir
+    path = os.path.join(user_config_dir("scope"), "gui_runs"); os.makedirs(path, exist_ok=True)
+    return path
+
+def load_runs() -> list:
+    """All run records saved by the GUI (newest last). A record is a dict: id, system, pid, log, started, seen."""
+    try:
+        with open(os.path.join(runs_dir(), "runs.json")) as f: return json.load(f)
+    except Exception: return []
+
+def save_runs(records: list) -> None:
+    try:
+        with open(os.path.join(runs_dir(), "runs.json"), "w") as f: json.dump(records[-30:], f, indent=2)       ## only the last 30 are kept
+    except Exception: pass
+
+def start_detached_local(env_path: str, system: str, inputs: list, quiet: bool=False, verbose: bool=False, errors: bool=False) -> dict:
+    """Starts `scope run` so that it does not depend on the window.
+
+    The run gets its own session (a Ctrl-C or the closing of the Terminal that started the GUI does not reach it), no pipe to
+    the GUI (a crash of the GUI cannot make it fail with a broken pipe), and writes to a log file. A wrapper appends
+    `__SCOPE_GUI_EXIT__ <code>` when it ends, so the end can be recognised even if the window is closed meanwhile.
+
+    Returns:
+        dict: the run record (also saved), with the pid of the wrapper (also the id of the process group) and the log path.
+    """
+    import subprocess, time
+    program, args = build_run_command(env_path, system, inputs, quiet, verbose, errors)
+    stamp = time.strftime("%Y%m%d_%H%M%S")
+    log   = os.path.join(runs_dir(), f"run_{system}_{stamp}.log")
+    proc  = subprocess.Popen(["bash", "-c", WRAPPER, "_", log, program, *args], start_new_session=True, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=child_environment())
+    record = {"id": f"{stamp}_{system}", "kind": "local", "system": system, "pid": proc.pid, "log": log, "started": time.time(), "seen": False, "command": "scope " + " ".join(args[2:])}
+    save_runs(load_runs() + [record])
+    return record
+
+def read_log(path: str, offset: int=0) -> tuple:
+    """Returns (new text, new offset): what was appended to the log since `offset` bytes. The end marker line is not part of the text."""
+    try:
+        with open(path, "rb") as f:
+            f.seek(offset); data = f.read()
+    except OSError: return "", offset
+    text = data.decode("utf-8", errors="replace")
+    return "\n".join(l for l in text.split("\n") if not l.startswith(EXIT_MARKER)), offset + len(data)
+
+def exit_code(path: str) -> "int | None":
+    """The exit code written by the wrapper at the end of a run, or None if the run has not ended (or was killed hard)."""
+    try:
+        with open(path, "rb") as f:
+            f.seek(max(0, os.path.getsize(path) - 400)); tail = f.read().decode("utf-8", errors="replace")
+    except OSError: return None
+    for line in reversed(tail.splitlines()):
+        if line.startswith(EXIT_MARKER):
+            try: return int(line.split()[1])
+            except (IndexError, ValueError): return None
+    return None
+
+def pid_alive(pid: int) -> bool:
+    """Whether a process is running. A run started by this window is its child: once it has ended it stays a zombie (still answering to kill -0)
+    until it is collected, so it is collected here first."""
+    try:
+        done, _ = os.waitpid(pid, os.WNOHANG)
+        if done == pid: return False
+    except ChildProcessError: pass                                          ## not our child (a run started by an earlier window): fall through
+    try: os.kill(pid, 0)
+    except ProcessLookupError: return False
+    except PermissionError: return True
+    return True
+
+def run_state(record: dict) -> tuple:
+    """('running', None), ('finished', exit code) or ('lost', None): the process is gone without writing its end marker (killed, or the computer restarted)."""
+    code = exit_code(record["log"])
+    if code is not None: return "finished", code
+    return ("running", None) if pid_alive(record["pid"]) else ("lost", None)
+
+def stop_run(record: dict) -> bool:
+    """Asks the whole run (wrapper and `scope run`) to end. Returns whether the signal was sent."""
+    import signal
+    try: os.killpg(record["pid"], signal.SIGTERM); return True
+    except (ProcessLookupError, PermissionError, OSError): return False
+
+def mark_seen(record_id: str) -> None:
+    records = load_runs()
+    for r in records:
+        if r["id"] == record_id: r["seen"] = True
+    save_runs(records)

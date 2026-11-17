@@ -1,13 +1,14 @@
 """Cluster page: connection profile, connection test, upload, run on the cluster, download.
 
-Network work runs in worker threads (plain subprocess calls, no chdir) or, for `scope run`, in a QProcess whose stdin
-carries the script. Nothing contacts a host until the user presses a button, and nothing is copied before the user has
+Network work runs in worker threads (plain subprocess calls, no chdir). A run on the cluster is started detached (nohup, its own
+log and pid file on the cluster): the window only watches it by reading the log, so closing the window or losing the connection
+does not stop it, and a window opened later can find it again. Nothing contacts a host until the user presses a button, and nothing is copied before the user has
 seen the list of files.
 """
 import os
 import time
 from collections.abc import Callable
-from PySide6.QtCore    import QProcess, QThreadPool, Qt
+from PySide6.QtCore    import QThreadPool, QTimer, Qt
 from PySide6.QtGui     import QBrush, QColor, QGuiApplication
 from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QDialog, QFormLayout, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMessageBox, QPlainTextEdit, QPushButton, QSplitter, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget)
 from scope.gui import backend, remote, theme
@@ -17,7 +18,8 @@ from scope.gui.tasks import Task
 class RemoteTab(QWidget):
     def __init__(self, session):
         super().__init__()
-        self.session, self.proc, self.busy, self.checks, self.tasks = session, None, False, [], []
+        self.session, self.watching, self.busy, self.checks, self.tasks = session, None, False, [], []
+        self.poll_ms = 5000; self.poll_timer = QTimer(self); self.poll_timer.timeout.connect(self.poll)
         self.profiles = remote.load_profiles()
         self.chooser  = QComboBox(); self.chooser.setMinimumWidth(180)
         self.new_btn, self.delete_btn, self.save_btn = QPushButton("New"), QPushButton("Delete"), QPushButton("Save profile")
@@ -35,12 +37,16 @@ class RemoteTab(QWidget):
         self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents); self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents); self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch); self.table.verticalHeader().setVisible(False)
         self.table.setWordWrap(True)
         self.system = QComboBox(); self.system.setMinimumWidth(200)
-        self.pre_up, self.up, self.run_btn, self.pre_down, self.down, self.stop_btn = (QPushButton(t) for t in ("Preview upload", "Upload", "Run on the cluster", "Preview download", "Download", "Stop"))
-        self.run_btn.setProperty("primary", True); self.stop_btn.setEnabled(False)
-        row2 = QHBoxLayout(); row2.addWidget(QLabel("System")); row2.addWidget(self.system); [row2.addWidget(b) for b in (self.pre_up, self.up, self.run_btn, self.stop_btn, self.pre_down, self.down)]; row2.addStretch(1)
+        self.pre_up, self.up, self.run_btn, self.pre_down, self.down = (QPushButton(t) for t in ("Preview upload", "Upload", "Run on the cluster", "Preview download", "Download"))
+        self.watch_btn, self.unwatch_btn, self.stopcl_btn = QPushButton("Watch runs"), QPushButton("Stop watching"), QPushButton("Stop the run")
+        self.watch_btn.setToolTip("Find a run that is active on the cluster (started from this window earlier, or before it was closed) and follow its log.")
+        self.unwatch_btn.setToolTip("Stop following the log. The run itself keeps going on the cluster."); self.stopcl_btn.setToolTip("Ask the cluster to end the run (SCOPE continues where it stopped the next time you run).")
+        self.run_btn.setProperty("primary", True); self.unwatch_btn.setEnabled(False); self.stopcl_btn.setEnabled(False)
+        row2 = QHBoxLayout(); row2.addWidget(QLabel("System")); row2.addWidget(self.system); [row2.addWidget(b) for b in (self.pre_up, self.up, self.pre_down, self.down)]; row2.addStretch(1)
+        row3 = QHBoxLayout(); [row3.addWidget(b) for b in (self.run_btn, self.watch_btn, self.unwatch_btn, self.stopcl_btn)]; row3.addStretch(1)
         self.log, self.status = QPlainTextEdit(), QLabel("Nothing has been sent to the cluster yet."); self.log.setReadOnly(True); self.log.setLineWrapMode(QPlainTextEdit.NoWrap)
         head = QLabel("SCOPE runs on the cluster; this window starts it over SSH and moves files with rsync. Your SSH setup is used as it is and no password is stored. Nothing is sent until you press a button."); head.setWordWrap(True); head.setObjectName("pagesub")
-        split = QSplitter(Qt.Vertical); upper = QWidget(); ul = QVBoxLayout(upper); ul.setContentsMargins(0, 0, 0, 0); ul.addWidget(self.table); lower = QWidget(); ll = QVBoxLayout(lower); ll.setContentsMargins(0, 0, 0, 0); ll.addLayout(row2); ll.addWidget(self.log, 1)
+        split = QSplitter(Qt.Vertical); upper = QWidget(); ul = QVBoxLayout(upper); ul.setContentsMargins(0, 0, 0, 0); ul.addWidget(self.table); lower = QWidget(); ll = QVBoxLayout(lower); ll.setContentsMargins(0, 0, 0, 0); ll.addLayout(row2); ll.addLayout(row3); ll.addWidget(self.log, 1)
         self.table.setMinimumHeight(210); self.log.setMinimumHeight(150); split.addWidget(upper); split.addWidget(lower); split.setStretchFactor(0, 1); split.setStretchFactor(1, 1); split.setSizes([260, 300])
         self.setMinimumHeight(720)
         self.hint = QLabel(); self.hint.setWordWrap(True)
@@ -52,7 +58,8 @@ class RemoteTab(QWidget):
         self.host.editTextChanged.connect(self.update_hint)
         self.new_btn.clicked.connect(self.new_profile); self.delete_btn.clicked.connect(self.delete_profile); self.save_btn.clicked.connect(self.save_profile); self.chooser.currentTextChanged.connect(self.choose)
         self.terminal_btn.clicked.connect(self.show_terminal_command); self.test_btn.clicked.connect(self.test_connection)
-        self.pre_up.clicked.connect(lambda: self.upload(preview=True)); self.up.clicked.connect(lambda: self.upload(preview=False)); self.run_btn.clicked.connect(self.run_remote); self.stop_btn.clicked.connect(self.stop)
+        self.pre_up.clicked.connect(lambda: self.upload(preview=True)); self.up.clicked.connect(lambda: self.upload(preview=False)); self.run_btn.clicked.connect(self.run_remote)
+        self.watch_btn.clicked.connect(self.watch_runs); self.unwatch_btn.clicked.connect(self.stop_watching); self.stopcl_btn.clicked.connect(self.stop_cluster_run)
         self.pre_down.clicked.connect(lambda: self.download(preview=True)); self.down.clicked.connect(lambda: self.download(preview=False))
         session.systemsChanged.connect(self.refresh_systems); session.envChanged.connect(self.refresh_systems); theme.on_change(self.render_checks); theme.on_change(self.render_lights)
         self.reload_chooser(); self.refresh_systems(); self.update_hint(); self.render_lights()
@@ -110,7 +117,8 @@ class RemoteTab(QWidget):
     ##### connection test #####
     def set_busy(self, busy: bool, message: str="") -> None:
         self.busy = busy
-        for b in (self.test_btn, self.pre_up, self.up, self.run_btn, self.pre_down, self.down): b.setEnabled(not busy)
+        for b in (self.test_btn, self.pre_up, self.up, self.pre_down, self.down, self.watch_btn): b.setEnabled(not busy)
+        self.run_btn.setEnabled(not busy and not self.watching)
         if message: self.status.setText(message)
 
     def background(self, fn: Callable, on_done: Callable, message: str) -> None:
@@ -142,6 +150,7 @@ class RemoteTab(QWidget):
         self.checks = checks; self.render_checks()
         failed = [c for c in checks if c.status == "fail"]; warned = [c for c in checks if c.status == "warn"]
         self.session.mark("cluster", not failed and bool(checks))
+        if not failed and checks: self.announce_runs()
         self.status.setText("Connection test passed." + (f" {len(warned)} warning(s)." if warned else "") if not failed else f"Connection test failed: {len(failed)} problem(s). Fix them and test again.")
 
     def render_checks(self) -> None:
@@ -204,7 +213,7 @@ class RemoteTab(QWidget):
             self.background(lambda: remote.sync(items, dry_run=False), lambda r: (self.show_sync(r, "Copied"), self.status.setText("Download finished."), self.session.systemsChanged.emit()), "Downloading…")
         self.background(lambda: remote.sync(items, dry_run=True), done, "Checking what would be copied…")
 
-    ##### run #####
+    ##### run: started detached, followed by reading its log #####
     def run_remote(self) -> None:
         got = self.need()
         if not got: return
@@ -214,22 +223,76 @@ class RemoteTab(QWidget):
         note = (f"\n\n{len(submit)} input file(s) have want_submit = True: jobs WILL be submitted to the scheduler and use computing time." if submit else "\n\nNo input file asks to submit.")
         missing = remote.unavailable_software(self.lights, valid)
         if missing: note += "\n\nWARNING from the last connection test:\n" + "\n".join(missing)
-        if QMessageBox.question(self, "Run on the cluster", f"Run `scope run` for '{system}' on {p.host}, with the files uploaded in {p.remote_root}/inputs.{note}") != QMessageBox.Yes: return
-        script = remote.run_script_text(p, system, [f"{p.remote_root.rstrip('/')}/inputs/{os.path.basename(r.path)}" for r in valid])
-        self.log.appendPlainText(f"\n$ ssh {p.host} 'scope set_path … && scope run -s {system} …'\n")
-        self.proc = QProcess(self); self.proc.setProcessChannelMode(QProcess.MergedChannels)
-        self.proc.readyReadStandardOutput.connect(lambda: self.log.appendPlainText(bytes(self.proc.readAllStandardOutput()).decode("utf-8", errors="replace").rstrip("\n")))
-        self.proc.finished.connect(self.run_finished); self.proc.errorOccurred.connect(lambda e: self.status.setText("Could not start ssh") if e == QProcess.FailedToStart else None)
-        argv = remote.ssh_argv(p); self.proc.start(argv[0], argv[1:]); self.proc.write(script.encode()); self.proc.closeWriteChannel()
-        self.set_busy(True, f"Running on {p.host}…"); self.stop_btn.setEnabled(True)
+        if QMessageBox.question(self, "Run on the cluster", f"Start `scope run` for '{system}' on {p.host}, with the files uploaded in {p.remote_root}/inputs.\n\nThe run is detached: it keeps going on the cluster if you close this window or lose the connection.{note}") != QMessageBox.Yes: return
+        script = remote.detached_run_script(p, system, [f"{p.remote_root.rstrip('/')}/inputs/{os.path.basename(r.path)}" for r in valid])
+        self.log.appendPlainText(f"\n$ ssh {p.host}  (start `scope set_path` and `scope run` for {system}, detached)\n")
+        self.background(lambda: remote.run_script(p, script, timeout=60), lambda res: self.started(p, system, res), f"Starting the run on {p.host}…")
 
-    def run_finished(self, code: int, status) -> None:
-        self.log.appendPlainText(bytes(self.proc.readAllStandardOutput()).decode("utf-8", errors="replace").rstrip("\n"))
-        self.set_busy(False, f"Cluster run finished with exit code {code}." if status == QProcess.NormalExit else "Cluster run stopped."); self.stop_btn.setEnabled(False)
-        if status == QProcess.NormalExit and code == 0: self.session.mark("ran")
+    def started(self, p: "remote.Profile", system: str, res: "remote.Result") -> None:
+        info = remote.parse_started(res.stdout)
+        if not info: self.log.appendPlainText("Could not start the run: " + (res.stderr.strip() or res.stdout.strip() or f"exit code {res.returncode}")); self.status.setText("The run did not start."); return
+        if info["state"] == "busy":
+            self.log.appendPlainText(f"A run of '{system}' is already active on the cluster (process {info['pid']}). Two runs on one system can overwrite each other's results, so none was started. Following the active one…"); self.watch_runs(); return
+        self.begin_watch(p, system, info["log"], f"Run started on the cluster (process {info['pid']}). It keeps going if you close this window or lose the connection.")
 
-    def stop(self) -> None:
-        if self.proc and self.proc.state() != QProcess.NotRunning: self.proc.terminate()
+    def begin_watch(self, p: "remote.Profile", system: str, log: str, note: str="") -> None:
+        self.watching = {"profile": p, "system": system, "log": log, "offset": 0, "polling": False}
+        if note: self.log.appendPlainText(note + f"\nLog on the cluster: {log}\n")
+        self.run_btn.setEnabled(False); self.unwatch_btn.setEnabled(True); self.stopcl_btn.setEnabled(True); self.status.setText(f"Watching the run on {p.host}…")
+        self.poll_timer.start(self.poll_ms); self.poll()
+
+    def poll(self) -> None:
+        w = self.watching
+        if not w or w["polling"]: return
+        w["polling"] = True; p = w["profile"]; task = Task(lambda: remote.run_script(p, remote.poll_script(p, w["system"], w["log"], w["offset"]), timeout=45)); self.tasks.append(task)
+        task.signals.done.connect(lambda res, w=w: self.polled(w, res)); task.signals.failed.connect(lambda m, w=w: self.polled(w, remote.Result(-1, "", m)))
+        QThreadPool.globalInstance().start(task)
+
+    def polled(self, w: dict, res: "remote.Result") -> None:
+        if self.watching is not w: return                                   # stopped watching meanwhile
+        w["polling"] = False
+        if not res.ok: self.status.setText("Cannot reach the cluster right now. The run goes on there; trying again…"); return
+        d = remote.parse_poll(res.stdout)
+        if d["text"].strip("\n"): self.log.appendPlainText(d["text"].rstrip("\n")); w["offset"] += d["bytes"]
+        if d["exit"] is not None or not d["alive"]:
+            self.poll_timer.stop(); self.watching = None; self.unwatch_btn.setEnabled(False); self.stopcl_btn.setEnabled(False); self.run_btn.setEnabled(not self.busy)
+            if d["exit"] is not None:
+                self.status.setText(f"Cluster run finished with exit code {d['exit']}.")
+                if d["exit"] == 0: self.session.mark("ran")
+            else: self.status.setText("The cluster run ended without finishing (stopped or killed). Run again: SCOPE continues where it stopped.")
+
+    def stop_watching(self) -> None:
+        """Stops following the log; the run itself is not touched."""
+        self.poll_timer.stop()
+        if self.watching:
+            self.watching = None; self.unwatch_btn.setEnabled(False); self.stopcl_btn.setEnabled(False); self.run_btn.setEnabled(not self.busy)
+            self.status.setText("Not watching. The run continues on the cluster; press Watch runs to follow it again.")
+
+    def stop_cluster_run(self) -> None:
+        w = self.watching
+        if not w: return
+        if QMessageBox.question(self, "Stop the run", f"Ask {w['profile'].host} to end the run of '{w['system']}'?\n\nJobs already submitted to the scheduler are not cancelled. SCOPE continues where it stopped the next time you run.") != QMessageBox.Yes: return
+        p, system = w["profile"], w["system"]
+        self.background(lambda: remote.run_script(p, remote.stop_script(p, system), timeout=30), lambda res: self.log.appendPlainText("Stop requested: " + (res.stdout.strip() or res.stderr.strip())), "Stopping…")
+
+    def announce_runs(self) -> None:
+        """After a passed connection test: tell, read-only, whether a run of this project is still active on the cluster."""
+        p = self.current()
+        self.background(lambda: remote.parse_runs(remote.run_script(p, remote.list_runs_script(p), timeout=30).stdout),
+                        lambda found: (self.log.appendPlainText("Active on the cluster: " + ", ".join(f"run of '{s}' (process {pid})" for s, pid, _ in found["active"]) + ". Press Watch runs to follow it.") if found["active"] else None), "Looking for active runs…")
+
+    def watch_runs(self) -> None:
+        """Finds a run that is active on the cluster (for instance one started before this window was closed) and follows its log."""
+        p = self.valid_profile()
+        if not p: return
+        def done(found):
+            current = self.system.currentText()
+            if found["active"]:
+                system, pid, log = next((a for a in found["active"] if a[0] == current), found["active"][0])
+                self.begin_watch(p, system, log, f"Following the active run of '{system}' (process {pid}).")
+            elif found["logs"]: self.log.appendPlainText(f"No run is active on the cluster. The latest log is {found['logs'][0]}"); self.status.setText("No active run.")
+            else: self.status.setText("No run found on the cluster for this project.")
+        self.background(lambda: remote.parse_runs(remote.run_script(p, remote.list_runs_script(p), timeout=30).stdout), done, f"Looking for runs on {p.host}…")
 
     def running(self) -> bool:
-        return bool(self.proc and self.proc.state() != QProcess.NotRunning)
+        return bool(self.watching)
