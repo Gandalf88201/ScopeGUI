@@ -8,7 +8,7 @@ seen the list of files.
 import os
 import time
 from collections.abc import Callable
-from PySide6.QtCore    import QThreadPool, QTimer, Qt
+from PySide6.QtCore    import QThreadPool, QTimer, Qt, Signal
 from PySide6.QtGui     import QBrush, QColor, QGuiApplication
 from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QDialog, QFormLayout, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMessageBox, QPlainTextEdit, QPushButton, QSplitter, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget)
 from scope.gui import backend, remote, theme
@@ -16,6 +16,10 @@ from scope.gui.theme import set_kind
 from scope.gui.tasks import Task
 
 class RemoteTab(QWidget):
+    """The Cluster page. The connection (a saved profile) is shared by all workspaces; the project on the cluster (folder and environment
+    file) belongs to the workspace shown, which the window saves when projectChanged is emitted."""
+    projectChanged = Signal()
+
     def __init__(self, session):
         super().__init__()
         self.session, self.watching, self.busy, self.checks, self.tasks = session, None, False, [], []
@@ -29,7 +33,11 @@ class RemoteTab(QWidget):
         self.scope_bin.setPlaceholderText("~/miniconda3/envs/scope/bin/scope  (or the full /home/you/... path)"); self.activate.setPlaceholderText("optional, only if the path above is empty")
         self.root.setPlaceholderText("~/scope_project  (a folder on the cluster; it need not exist yet)"); self.env_file.setPlaceholderText("/home/you/scope_project/scope_env_cluster.npy")
         form = QFormLayout(); form.setLabelAlignment(Qt.AlignRight)
-        for label, w in (("Profile name", self.name), ("SSH host", self.host), ("Path of scope on the cluster", self.scope_bin), ("…or a line that makes it available", self.activate), ("Project folder on the cluster", self.root), ("Cluster environment file", self.env_file)): form.addRow(label, w)
+        for label, w in (("Profile name", self.name), ("SSH host", self.host), ("Path of scope on the cluster", self.scope_bin), ("…or a line that makes it available", self.activate)): form.addRow(label, w)
+        project_title = QLabel("Project on the cluster  (this workspace)"); project_title.setObjectName("sectiontitle")
+        form.addRow(project_title)
+        for label, w in (("Project folder on the cluster", self.root), ("Cluster environment file", self.env_file)): form.addRow(label, w)
+        self.loading_project = False
         top = QHBoxLayout(); top.addWidget(QLabel("Profile")); top.addWidget(self.chooser); top.addWidget(self.new_btn); top.addWidget(self.delete_btn); top.addStretch(1)
         self.terminal_btn, self.test_btn = QPushButton("Show terminal command"), QPushButton("Test connection"); self.test_btn.setProperty("primary", True)
         self.save_btn.setProperty("primary", True); row1 = QHBoxLayout(); row1.addWidget(self.save_btn); row1.addWidget(self.terminal_btn); row1.addWidget(self.test_btn); row1.addStretch(1)
@@ -55,6 +63,7 @@ class RemoteTab(QWidget):
         self.light_labels = [QLabel() for _ in range(3)]; [self.lights_row.addWidget(l) for l in self.light_labels]; self.lights_row.addStretch(1); self.when = QLabel(); self.when.setObjectName("pagesub"); self.lights_row.addWidget(self.when)
         lay = QVBoxLayout(self); lay.addWidget(head); lay.addLayout(top); lay.addLayout(form); lay.addWidget(self.hint); lay.addLayout(row1); lay.addWidget(self.status); lay.addLayout(self.lights_row); lay.addWidget(split, 1)
         for edit in (self.name, self.scope_bin, self.activate, self.root, self.env_file): edit.textChanged.connect(self.update_hint)
+        for edit in (self.root, self.env_file): edit.textChanged.connect(self.project_edited)
         self.host.editTextChanged.connect(self.update_hint)
         self.new_btn.clicked.connect(self.new_profile); self.delete_btn.clicked.connect(self.delete_profile); self.save_btn.clicked.connect(self.save_profile); self.chooser.currentTextChanged.connect(self.choose)
         self.terminal_btn.clicked.connect(self.show_terminal_command); self.test_btn.clicked.connect(self.test_connection)
@@ -71,9 +80,31 @@ class RemoteTab(QWidget):
         self.choose(self.chooser.currentText())
 
     def choose(self, name: str) -> None:
+        """Shows the connection of a saved profile. The project fields are not touched: they belong to the workspace."""
         p = self.profiles.get(name, remote.Profile())
         self.lights, self.checked_at = remote.unchecked_lights(), ""; self.render_lights()
-        self.name.setText(p.name); self.host.setEditText(p.host); self.scope_bin.setText(p.scope_bin); self.activate.setText(p.activate); self.root.setText(p.remote_root); self.env_file.setText(p.remote_env)
+        self.name.setText(p.name); self.host.setEditText(p.host); self.scope_bin.setText(p.scope_bin); self.activate.setText(p.activate)
+        if not self.loading_project: self.projectChanged.emit()
+
+    def select_profile(self, name: str) -> None:
+        """Selects a saved connection by name (or none)."""
+        self.chooser.blockSignals(True)
+        if name in self.profiles: self.chooser.setCurrentText(name)
+        else: self.chooser.setCurrentIndex(-1)
+        self.chooser.blockSignals(False); self.choose(name if name in self.profiles else "")
+
+    def set_project(self, root: str, env: str, suggestion: str="") -> None:
+        """Shows the project on the cluster of the workspace (without saving anything back)."""
+        self.loading_project = True
+        self.root.setText(root); self.env_file.setText(env)
+        self.root.setPlaceholderText(f"{suggestion}  (a folder on the cluster; it need not exist yet)" if suggestion else "~/scope_project  (a folder on the cluster; it need not exist yet)")
+        self.loading_project = False; self.update_hint()
+
+    def project(self) -> tuple:
+        return self.root.text().strip(), self.env_file.text().strip()
+
+    def project_edited(self) -> None:
+        if not self.loading_project: self.projectChanged.emit()
 
     def new_profile(self) -> None:
         self.chooser.blockSignals(True); self.chooser.setCurrentIndex(-1); self.chooser.blockSignals(False); self.choose("")
@@ -82,8 +113,8 @@ class RemoteTab(QWidget):
         """Tells, while the user types, what is still missing or wrong in the profile (the same checks Save and Test use)."""
         p = self.current(); problems = remote.field_problems(p)
         labels = {"name": "Profile name", "host": "SSH host", "scope_bin": "Path of scope", "root": "Project folder", "env": "Environment file"}
-        if problems: self.hint.setText("To complete the profile:\n" + "\n".join(f"  • {labels[k]}: {v}" for k, v in problems.items())); set_kind(self.hint, "warn")
-        else: self.hint.setText("✓ The profile is complete. Press Save profile, then Test connection."); set_kind(self.hint, "ok")
+        if problems: self.hint.setText("To complete the profile and the project:\n" + "\n".join(f"  • {labels[k]}: {v}" for k, v in problems.items())); set_kind(self.hint, "warn")
+        else: self.hint.setText("✓ The connection and the project are complete. Save the profile, then Test connection."); set_kind(self.hint, "ok")
         root = self.root.text().strip()
         self.env_file.setPlaceholderText((root.rstrip("/") + "/scope_env_<name>.npy") if root else "~/scope_project/scope_env_cluster.npy")
 
@@ -91,9 +122,13 @@ class RemoteTab(QWidget):
         return remote.Profile(self.name.text().strip(), self.host.currentText().strip(), self.scope_bin.text().strip(), self.activate.text().strip(), self.root.text().strip(), self.env_file.text().strip())
 
     def save_profile(self) -> bool:
-        p = self.current(); problems = remote.validate_profile(p)
+        """Saves the connection (name, host, how to start scope). The project fields are saved with the workspace, not in the profile."""
+        p = self.current(); labels = {"name": "Profile name", "host": "SSH host", "scope_bin": "Path of scope"}
+        problems = [f"{labels[k]}: {v}" for k, v in remote.connection_problems(p).items()]
         if problems: QMessageBox.warning(self, "Profile not saved", "\n".join(problems)); return False
-        remote.save_profile(p); self.profiles = remote.load_profiles(); self.reload_chooser(p.name); self.status.setText(f"✓ Profile '{p.name}' saved. Next: Test connection."); set_kind(self.status, "ok"); return True
+        remote.save_profile(p, connection_only=True); self.profiles = remote.load_profiles()
+        self.loading_project = True; self.reload_chooser(p.name); self.loading_project = False; self.projectChanged.emit()
+        self.status.setText(f"✓ Profile '{p.name}' saved. Next: Test connection."); set_kind(self.status, "ok"); return True
 
     def delete_profile(self) -> None:
         name = self.chooser.currentText()

@@ -87,6 +87,11 @@ def stylesheet(c: dict) -> str:
     QLabel[kind="err"] {{ color: {c['err']}; font-weight: 600; }}
     QLabel#pagetitle {{ font-size: 22px; font-weight: 700; color: {c['text']}; }}
     QLabel#pagesub {{ color: {c['sub']}; }}
+    QLabel#sectiontitle {{ color: {c['text']}; font-weight: 700; padding-top: 8px; }}
+    QLabel#wslabel {{ color: {c['sidebar_sub']}; font-size: 11px; }}
+    QComboBox#wscombo {{ background: rgba(255,255,255,0.08); color: {c['sidebar_text']}; border: 1px solid rgba(255,255,255,0.18); border-radius: 6px; padding: 4px 8px; }}
+    QPushButton#wsbtn::menu-indicator {{ image: none; width: 0px; }}
+    QPushButton#wsbtn {{ background: transparent; color: {c['sidebar_text']}; border: 1px solid rgba(255,255,255,0.18); border-radius: 6px; padding: 3px 8px; }}
     QLabel#badge {{ background: {c['alt']}; border: 1px solid {c['border']}; border-radius: 10px; padding: 3px 10px; color: {c['sub']}; }}
     QListWidget#manualtoc {{ background: transparent; border: none; outline: 0; }}
     QListWidget#manualtoc::item {{ padding: 7px 10px; margin: 1px 0; border-radius: 6px; color: {c['text']}; }}

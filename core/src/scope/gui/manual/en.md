@@ -78,6 +78,33 @@ The version is read from the installation each time, so it follows an upgrade. T
 4. **Run.** Choose the system and press **Run**.
 5. **Cluster** (optional). Add your cluster, press **Test connection**, then upload, run and download.
 
+## Workspaces
+
+A workspace is one project as this window sees it: an environment, the input files of its pipeline, a cluster connection and a project folder on that cluster. You can keep several and switch between them; the window shows one at a time.
+
+| Part of a workspace | Where you set it |
+|---|---|
+| Environment (local folders) | 1 · Environment |
+| Input files of the pipeline | 3 · Pipeline |
+| Cluster connection (a saved profile) | 5 · Cluster, top part. One profile can serve many workspaces. |
+| Project folder and environment file on the cluster | 5 · Cluster, *Project on the cluster* |
+
+### Create, switch, rename, delete
+
+The switcher sits under the SCOPE title in the left bar.
+
+- **+** makes a new, empty workspace and opens step 1. It keeps the cluster connection of the workspace you were in and proposes `~/scope_projects/<name>` as its project folder on the cluster.
+- Choose a workspace in the list to switch. Everything is saved as you work, so nothing is lost by switching or by closing the window, which reopens on the workspace shown last.
+- **⋯** renames or deletes the workspace shown. Deleting removes only the workspace from this window: its environment, systems, input files, runs and everything on the cluster stay as they are. The last workspace cannot be deleted.
+
+### Runs and workspaces
+
+Runs do not belong to the window, so they keep going whichever workspace is shown. When you come back to a workspace, its run is shown again, or how it ended. On the Cluster page, **Watch runs** finds a run of that workspace's project again.
+
+> **Warning.** Two workspaces can point to the same environment. The Run page then refuses to start a system that is already running from that environment, from any workspace or window, because two runs of one system overwrite each other's results.
+
+> **Note.** The first time this version starts, it makes a workspace called *Default* from what the window remembered before: the last environment and, if there was exactly one cluster profile, its project folder. Runs started with an older version are shown there.
+
 ## How SCOPE thinks
 
 SCOPE organises work in a fixed hierarchy: **System → Branch → Workflow → Job → Computation**.
@@ -182,9 +209,9 @@ A run starts as a separate process and writes its output to a log file. It keeps
 
 ### Running several systems at once
 
-Runs of different systems can go on at the same time, whether they share an environment or not.
+Runs of different systems can go on at the same time, whether they share an environment or not, and from different workspaces.
 
-> **Warning.** Never run the same system twice at once. Each run loads the system file when it starts and saves it when it ends, so the run that finishes last overwrites what the other one registered. Both runs still submit their jobs, but the system file forgets one of them until you run that input again; SCOPE then finds the job by its name in the queue and registers it again. The cluster launcher of this window refuses a second run of the same system for this reason.
+> **Warning.** Never run the same system twice at once. Each run loads the system file when it starts and saves it when it ends, so the run that finishes last overwrites what the other one registered. Both runs still submit their jobs, but the system file forgets one of them until you run that input again; SCOPE then finds the job by its name in the queue and registers it again. For this reason the Run page refuses to start a system that is already running from the same environment (from any workspace or window), and the cluster launcher refuses a second run of the same system in one project folder.
 
 ## 5 · Cluster
 
@@ -212,16 +239,18 @@ The module names you give there are what SCOPE uses to find Gaussian 16 and Quan
 
 ### Set up a profile
 
-A profile describes one cluster. Press **New** (or start typing, the first time), fill in the fields and press **Save profile**. The yellow hint under the fields says what is still missing; it turns into a green tick when the profile is complete.
+The page has two parts. The **profile** (top) is the connection to one cluster and is shared by all workspaces. The **project on the cluster** (below it) belongs to the workspace shown, so each workspace can use its own folder on the same cluster.
 
-| Field | What to write | Example |
-|---|---|---|
-| Profile name | Any label: letters, digits, `_`, `-`, no spaces | `nersc` |
-| SSH host | The name you use with `ssh`. The list shows the names found in your `~/.ssh/config`. | `nersc` |
-| Path of scope on the cluster | Where the `scope` program is. Prefer this field. | `~/miniconda3/envs/scope/bin/scope` |
-| Line that makes scope available | Only if the path field is empty, for example `module load scope`. `conda activate` often does not work in this kind of shell, which is why the path is preferred. | |
-| Project folder on the cluster | The folder that holds `Sources`, `Systems` and `Computations` | `~/scope_project` |
-| Cluster environment file | The `scope_env_*.npy` made by `scope config` | `~/scope_project/scope_env_cluster.npy` |
+Press **New** (or start typing, the first time), fill in the connection and press **Save profile**. Then fill in the project fields: they are saved with the workspace as you type. The yellow hint under the fields says what is still missing; it turns into a green tick when both parts are complete.
+
+| Field | Part | What to write | Example |
+|---|---|---|---|
+| Profile name | Profile | Any label: letters, digits, `_`, `-`, no spaces | `nersc` |
+| SSH host | Profile | The name you use with `ssh`. The list shows the names found in your `~/.ssh/config`. | `nersc` |
+| Path of scope on the cluster | Profile | Where the `scope` program is. Prefer this field. | `~/miniconda3/envs/scope/bin/scope` |
+| Line that makes scope available | Profile | Only if the path field is empty, for example `module load scope`. `conda activate` often does not work in this kind of shell, which is why the path is preferred. | |
+| Project folder on the cluster | Workspace | The folder that holds `Sources`, `Systems` and `Computations` | `~/scope_projects/water` |
+| Cluster environment file | Workspace | The `scope_env_*.npy` made by `scope config` | `~/scope_projects/water/scope_env_cluster.npy` |
 
 > **Tip.** To find the values, log in and run `which scope` (the path of `scope`) and `pwd` inside the project folder. Paths start with `/` or `~/`, with no spaces and no `$VARIABLES`.
 

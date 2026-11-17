@@ -38,12 +38,25 @@ def load_gui_config() -> dict:
         with open(gui_config_path()) as f: return json.load(f)
     except Exception: return {}
 
+@contextmanager
+def file_lock(path: str):
+    """Exclusive lock held while the block runs (a lock file next to the data), so two windows that update the same file do not overwrite each other."""
+    try: import fcntl
+    except ImportError: yield; return                                       ## Windows: no fcntl
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "a") as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        try: yield
+        finally: fcntl.flock(handle, fcntl.LOCK_UN)
+
 def save_gui_config(data: dict) -> None:
-    """Updates the GUI preferences. Failures (read-only home, for instance) are ignored."""
+    """Updates some keys of the GUI preferences: the file is read again under a lock and only those keys are replaced. Failures (read-only home, for instance) are ignored."""
     try:
-        config = load_gui_config(); config.update(data)
-        os.makedirs(os.path.dirname(gui_config_path()), exist_ok=True)
-        with open(gui_config_path(), "w") as f: json.dump(config, f, indent=4)
+        with file_lock(gui_config_path() + ".lock"):
+            config = load_gui_config(); config.update(data)
+            tmp = gui_config_path() + f".{os.getpid()}.tmp"
+            with open(tmp, "w") as f: json.dump(config, f, indent=4)
+            os.replace(tmp, gui_config_path())
     except Exception: pass
 
 ###################
@@ -614,15 +627,9 @@ def save_runs(records: list) -> None:
         with open(os.path.join(runs_dir(), "runs.json"), "w") as f: json.dump(keep, f, indent=2)
     except Exception: pass
 
-@contextmanager
 def runs_lock():
     """Exclusive lock on the run records, so two windows that update them at the same time do not overwrite each other."""
-    try: import fcntl
-    except ImportError: yield; return                                       ## Windows: no fcntl (local runs need bash anyway)
-    with open(os.path.join(runs_dir(), "runs.lock"), "a") as handle:
-        fcntl.flock(handle, fcntl.LOCK_EX)
-        try: yield
-        finally: fcntl.flock(handle, fcntl.LOCK_UN)
+    return file_lock(os.path.join(runs_dir(), "runs.lock"))
 
 def update_runs(change: "Callable[[list], None]") -> list:
     """Loads the records, lets `change` modify the list in place, and saves it, all under runs_lock. Returns the saved list."""
@@ -645,7 +652,7 @@ def start_detached_local(env_path: str, system: str, inputs: list, quiet: bool=F
     stamp = time.strftime("%Y%m%d_%H%M%S")
     log   = os.path.join(runs_dir(), f"run_{system}_{stamp}.log")
     proc  = subprocess.Popen(["bash", "-c", WRAPPER, "_", log, program, *args], start_new_session=True, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=child_environment())
-    record = {"id": f"{stamp}_{system}", "kind": "local", "system": system, "pid": proc.pid, "log": log, "started": time.time(), "seen": False, "command": "scope " + " ".join(args[2:])}
+    record = {"id": f"{stamp}_{system}", "kind": "local", "system": system, "env": os.path.abspath(env_path), "pid": proc.pid, "log": log, "started": time.time(), "seen": False, "command": "scope " + " ".join(args[2:])}
     update_runs(lambda records: records.append(record))
     return record
 
@@ -727,6 +734,20 @@ def stop_run(record: dict) -> bool:
     if not is_our_run(record): return False
     try: os.killpg(record["pid"], signal.SIGTERM); return True
     except (ProcessLookupError, PermissionError, OSError): return False
+
+def record_belongs(record: dict, env_path: str, legacy: bool=False) -> bool:
+    """Whether a run record belongs to the workspace of environment `env_path`. Records made before workspaces existed have no environment: they belong to the legacy workspace."""
+    if "env" not in record: return legacy
+    return bool(env_path) and os.path.abspath(env_path) == record["env"]
+
+def active_local_run(env_path: str, system: str) -> "dict | None":
+    """A local run of `system` that is still running from the environment `env_path` (from any window or workspace), or None.
+    Old records without an environment count when the system name matches: being careful is cheaper than two runs of one system."""
+    for record in reversed(load_runs()):
+        if record.get("kind") != "local" or record.get("system") != system: continue
+        if "env" in record and record["env"] != os.path.abspath(env_path): continue
+        if run_state(record)[0] == "running": return record
+    return None
 
 def mark_seen(record_id: str) -> None:
     def change(records: list) -> None:

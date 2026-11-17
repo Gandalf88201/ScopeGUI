@@ -59,19 +59,28 @@ def expand_home(path: str, home: str) -> str:
     if home and (path == "~" or path.startswith("~/")): return home.rstrip("/") + path[1:]
     return path
 
-def field_problems(p: Profile) -> dict:
-    """Problems per field (field name -> message), for hints shown while the user types. Empty fields are reported too."""
+def connection_problems(p: Profile) -> dict:
+    """Problems of the connection part of a profile (name, host, how to start scope), per field. This is what a saved profile holds."""
     out = {}
     if not backend.SAFE_NAME.match(p.name or ""): out["name"] = "Letters, digits, '_', '-' or '.', no spaces."
     if not p.host: out["host"] = "The SSH host or alias is empty."
     elif p.host.startswith("-") or re.search(r"\s", p.host): out["host"] = "A host name has no spaces and does not start with '-'."
     if not p.scope_bin and not p.activate: out["scope_bin"] = "Give the full path of `scope` on the cluster (or a line in the next box)."
     elif p.scope_bin and not is_remote_path(p.scope_bin): out["scope_bin"] = "Write the full path starting with / or ~/ , with no spaces and no $VARIABLES."
+    return out
+
+def project_problems(p: Profile) -> dict:
+    """Problems of the project part (project folder and environment file on the cluster), per field. A workspace holds these."""
+    out = {}
     if not p.remote_root: out["root"] = "Give the project folder on the cluster, for example ~/scope_project."
     elif not is_remote_path(p.remote_root): out["root"] = "Write the path starting with / or ~/ , with no spaces and no $VARIABLES."
     if not p.remote_env: out["env"] = "Give the cluster environment file, for example ~/scope_project/scope_env_cluster.npy."
     elif not is_remote_path(p.remote_env): out["env"] = "Write the path starting with / or ~/ , with no spaces and no $VARIABLES."
     return out
+
+def field_problems(p: Profile) -> dict:
+    """Problems per field (field name -> message) of the connection and the project together, for hints shown while the user types. Empty fields are reported too."""
+    return {**connection_problems(p), **project_problems(p)}
 
 def validate_profile(p: Profile) -> list:
     """Returns a list of problems with the profile (empty if it can be used)."""
@@ -87,8 +96,13 @@ def load_profiles() -> dict:
         except TypeError: continue
     return out
 
-def save_profile(p: Profile) -> None:
-    profiles = backend.load_gui_config().get("profiles", {}); profiles[p.name] = asdict(p)
+def save_profile(p: Profile, connection_only: bool=False) -> None:
+    """Saves a profile. With connection_only, the project fields already stored under that name are kept as they are (the project now
+    belongs to each workspace; a profile saved by an older version keeps its own values, which its legacy workspace may still use)."""
+    profiles = backend.load_gui_config().get("profiles", {}); data = asdict(p)
+    if connection_only:
+        old = profiles.get(p.name, {}); data["remote_root"], data["remote_env"] = old.get("remote_root", ""), old.get("remote_env", "")
+    profiles[p.name] = data
     backend.save_gui_config({"profiles": profiles})
 
 def delete_profile(name: str) -> None:

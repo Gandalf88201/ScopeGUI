@@ -9,9 +9,9 @@ import time
 from PySide6.QtCore    import Qt, QObject, QThreadPool, QTimer, Signal
 from PySide6.QtGui     import QBrush, QColor, QGuiApplication, QPainter, QPalette, QPen, QPolygonF
 from PySide6.QtCore    import QPointF
-from PySide6.QtWidgets import (QApplication, QButtonGroup, QCheckBox, QDialog, QFrame, QScrollArea, QStackedWidget, QComboBox, QFileDialog, QFormLayout, QGraphicsScene, QGraphicsView, QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMessageBox,
+from PySide6.QtWidgets import (QApplication, QButtonGroup, QCheckBox, QDialog, QFrame, QInputDialog, QMenu, QScrollArea, QStackedWidget, QComboBox, QFileDialog, QFormLayout, QGraphicsScene, QGraphicsView, QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMessageBox,
                                QPlainTextEdit, QPushButton, QSplitter, QTableWidget, QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget, QHeaderView, QAbstractItemView)
-from scope.gui import backend, theme
+from scope.gui import backend, theme, workspaces
 from scope.gui.tasks import Task
 
 #################
@@ -37,6 +37,11 @@ class Session(QObject):
     def mark(self, key: str, value: bool=True) -> None:
         """Records that a step was completed (a run finished, a cluster test passed) so the left bar can show it."""
         if self.progress.get(key) != value: self.progress[key] = value; self.progressChanged.emit()
+
+    def clear(self) -> None:
+        """Forgets the environment, the inputs and the step dots (an empty workspace, or before another workspace is loaded)."""
+        self.env, self.info, self.reports, self.progress = None, None, [], {"ran": False, "cluster": False}
+        self.envChanged.emit(); self.systemsChanged.emit(); self.inputsChanged.emit(); self.progressChanged.emit()
 
     def set_environment(self, env: object, info: object) -> None:
         self.env, self.info = env, info
@@ -131,6 +136,9 @@ class EnvironmentTab(QWidget):
 
     def show_summary(self) -> None:
         i = self.session.info
+        if i is None:                                                                 ## an empty workspace: nothing to show, and no folders of another project left in the form
+            self.root.blockSignals(True); [e.setText("") for e in (self.root, self.sources, self.systems, self.comps, self.savedir)]; self.root.blockSignals(False)
+            self.summary.setPlainText("No environment in this workspace yet. Choose a project folder and press Create local environment, or open an existing environment."); return
         self.name.setText(i.name); self.root.blockSignals(True)                      ## show the loaded environment in the form (the root box is only a helper)
         self.sources.setText(i.sources_path); self.systems.setText(i.systems_path); self.comps.setText(i.computations_path); self.savedir.setText(os.path.dirname(i.filepath))
         common = os.path.commonpath([i.sources_path, i.systems_path, i.computations_path]) if i.sources_path and i.systems_path and i.computations_path else ""
@@ -307,7 +315,7 @@ class RunTab(QWidget):
     def __init__(self, session: Session):
         super().__init__()
         self.session = session
-        self.record, self.offset = None, 0
+        self.record, self.offset, self.accept_legacy = None, 0, False       ## accept_legacy: show runs recorded before workspaces existed (the Default workspace)
         self.timer   = QTimer(self); self.timer.timeout.connect(self.tick)
         self.system  = QComboBox()
         self.quiet, self.verbose, self.errors = QCheckBox("quiet (-q)"), QCheckBox("verbose (-v)"), QCheckBox("handle errors (-e)")
@@ -333,6 +341,8 @@ class RunTab(QWidget):
         if not s.info or not self.system.currentText() or not valid:
             QMessageBox.information(self, "Nothing to run", "Choose an environment, a system and at least one valid input file."); return
         if self.running(): QMessageBox.information(self, "A run is in progress", "Wait for the current run to end, or stop it first: two runs on one system can overwrite each other's results."); return
+        other = backend.active_local_run(s.info.filepath, self.system.currentText())
+        if other: QMessageBox.information(self, "This system is already running", f"'{other['system']}' is already being run from this environment (started {time.strftime('%H:%M', time.localtime(other['started']))}, perhaps from another workspace or window). Two runs on one system overwrite each other's results: wait for it to end."); return
         warning = backend.submission_warning(s.info, valid)
         if warning and QMessageBox.question(self, "Jobs will be submitted", warning + "\n\nContinue?") != QMessageBox.Yes: return
         record = backend.start_detached_local(s.info.filepath, self.system.currentText(), [r.path for r in valid], self.quiet.isChecked(), self.verbose.isChecked(), self.errors.isChecked())
@@ -365,12 +375,18 @@ class RunTab(QWidget):
         self.session.systemsChanged.emit()
 
     def reattach(self) -> None:
-        """When the window opens: follow the latest run started from the GUI that is still running, or show the end of one that finished while the window was closed."""
+        """Follows again the latest run of this workspace's environment that is still running, or shows the end of one that finished while it was not shown."""
+        env = self.session.info.filepath if self.session.info else ""
         for record in reversed(backend.load_runs()):
-            if record.get("kind") != "local" or record.get("seen"): continue
+            if record.get("kind") != "local" or record.get("seen") or not backend.record_belongs(record, env, self.accept_legacy): continue
             state, code = backend.run_state(record)
-            self.attach(record, note="Found again: this run was started before the window was (re)opened." + ("" if state == "running" else " It ended while the window was closed."))
+            self.attach(record, note="Found again: this run was started earlier." + ("" if state == "running" else " It ended while it was not shown."))
             return
+
+    def detach(self) -> None:
+        """Stops following the run (when another workspace is shown). The run goes on and is not marked as seen, so it is found again later."""
+        self.timer.stop(); self.record, self.offset = None, 0
+        self.log.clear(); self.run_btn.setEnabled(True); self.stop_btn.setEnabled(False); self.status.setText("Idle")
 
     def stop(self) -> None:
         if self.record and backend.stop_run(self.record): self.status.setText("Stopping…")
@@ -451,6 +467,13 @@ class MainWindow(QMainWindow):
         brand = QLabel("SCOPE"); brand.setObjectName("brand"); brandsub = QLabel("workflow assistant"); brandsub.setObjectName("brandsub")
         self.local_label = ClickLabel(); self.local_label.setCursor(Qt.PointingHandCursor); self.local_label.setObjectName("localstatus"); self.local_label.setTextFormat(Qt.RichText); self.local_label.clicked.connect(self.show_local)
         bl = QVBoxLayout(); bl.setContentsMargins(18, 0, 0, 14); bl.setSpacing(0); bl.addWidget(brand); bl.addWidget(brandsub); bl.addSpacing(8); bl.addWidget(self.local_label); sl.addLayout(bl)
+        ws_label = QLabel("WORKSPACE"); ws_label.setObjectName("wslabel")
+        self.ws_combo = QComboBox(); self.ws_combo.setObjectName("wscombo"); self.ws_combo.setToolTip("The project shown: its environment, input files and project on the cluster. Runs keep going whichever workspace is shown.")
+        self.ws_combo.setMinimumContentsLength(8); self.ws_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.ws_new_btn = QPushButton("+"); self.ws_new_btn.setObjectName("wsbtn"); self.ws_new_btn.setFixedWidth(28); self.ws_new_btn.setToolTip("New workspace"); self.ws_new_btn.clicked.connect(self.new_workspace)
+        self.ws_menu_btn = QPushButton("⋯"); self.ws_menu_btn.setObjectName("wsbtn"); self.ws_menu_btn.setFixedWidth(28); self.ws_menu_btn.setToolTip("Rename or delete this workspace")
+        ws_menu = QMenu(self); ws_menu.addAction("Rename this workspace…", self.rename_workspace); ws_menu.addAction("Delete this workspace…", self.delete_workspace); self.ws_menu_btn.setMenu(ws_menu)
+        wl = QVBoxLayout(); wl.setContentsMargins(14, 0, 14, 12); wl.setSpacing(4); wl.addWidget(ws_label); wr = QHBoxLayout(); wr.setSpacing(4); wr.addWidget(self.ws_combo, 1); wr.addWidget(self.ws_new_btn); wr.addWidget(self.ws_menu_btn); wl.addLayout(wr); sl.addLayout(wl)
         self.group, self.step_buttons = QButtonGroup(self), []
         for i, (key, title, _, _) in enumerate(STEPS):
             b = QPushButton(); b.setObjectName("step"); b.setCheckable(True); b.setCursor(Qt.PointingHandCursor); b.clicked.connect(lambda _=False, i=i: self.go(i)); self.group.addButton(b, i); self.step_buttons.append(b); sl.addWidget(b)
@@ -468,9 +491,10 @@ class MainWindow(QMainWindow):
         QGuiApplication.instance().applicationStateChanged.connect(self.on_app_state)
         self.check_local()
         self.go(0); self.update_steps()
-        path = env_path or backend.load_gui_config().get("last_env")
-        if path and os.path.isfile(path): self.env_tab.load(path) if env_path else self.try_last(path)
-        self.run_tab.reattach()
+        self.loading, self.workspace = False, None
+        for signal in (self.session.envChanged, self.session.inputsChanged, self.remote_tab.projectChanged): signal.connect(self.save_workspace)
+        self.ws_combo.currentTextChanged.connect(self.switch_workspace)
+        self.load_workspace(workspaces.ensure(), env_override=env_path)
 
     def check_local(self) -> None:
         """Asks, in a worker thread, whether SCOPE can run from this computer (the same question every run depends on). The version shown is read from the installation each time."""
@@ -540,6 +564,77 @@ class MainWindow(QMainWindow):
         self.theme_btn.setText(f"{glyph}  Theme: {theme.preference().capitalize()}")
         self.pipe_tab.refresh()                                           ## the graph and the status colours are drawn by hand
 
+    ##### workspaces #####
+    def refresh_workspaces(self) -> None:
+        self.ws_combo.blockSignals(True); self.ws_combo.clear(); self.ws_combo.addItems(workspaces.list_names())
+        if self.workspace: self.ws_combo.setCurrentText(self.workspace.name)
+        self.ws_combo.blockSignals(False)
+
+    def load_workspace(self, ws: "workspaces.Workspace", env_override: str=None) -> None:
+        """Shows a workspace: its environment, input files, cluster connection and project on the cluster, and its run if one is active.
+        Runs of the workspace shown before keep going; they are found again when it is shown again."""
+        self.loading = True
+        try:
+            self.run_tab.detach(); self.remote_tab.stop_watching(); self.session.clear()
+            path = env_override or ws.env_path
+            if path and os.path.isfile(path): self.env_tab.load(path) if env_override else self.try_last(path)
+            elif ws.env_path: self.statusBar().showMessage(f"The environment of workspace '{ws.name}' was not found: {ws.env_path}", 15000)
+            if self.session.info is None: self.env_tab.name.setText(workspaces.file_name(ws.name)[:-5])             ## a proposed environment name for an empty workspace
+            if ws.inputs: self.session.add_inputs(ws.inputs)                                    ## a file that no longer exists shows as an error row, it is not dropped
+            self.remote_tab.loading_project = True; self.remote_tab.select_profile(ws.profile); self.remote_tab.loading_project = False
+            root, env = workspaces.remote_fields(ws, self.remote_tab.profiles.get(ws.profile))
+            self.remote_tab.set_project(root, env, workspaces.suggested_remote_root(ws))
+            self.workspace = ws; workspaces.set_active(ws.name); self.refresh_workspaces()
+            self.run_tab.accept_legacy = ws.legacy; self.run_tab.reattach()
+            self.setWindowTitle(f"SCOPE — {ws.name}"); self.ws_combo.setToolTip(f"Workspace '{ws.name}': its environment, input files and project on the cluster. Runs keep going whichever workspace is shown.")
+        finally:
+            self.loading = False
+        if env_override: self.save_workspace()
+        self.update_steps()
+
+    def save_workspace(self) -> None:
+        """Writes what the window shows into the active workspace (called when the environment, the inputs or the cluster project change)."""
+        if self.loading or self.workspace is None: return
+        ws = self.workspace
+        ws.env_path = self.session.info.filepath if self.session.info else ""
+        ws.inputs   = [r.path for r in self.session.reports]
+        ws.profile  = self.remote_tab.chooser.currentText() if self.remote_tab.chooser.currentIndex() >= 0 else ""
+        ws.remote_root, ws.remote_env = self.remote_tab.project()
+        try: workspaces.save(ws)
+        except OSError as exc: self.statusBar().showMessage(f"Could not save workspace '{ws.name}': {exc}", 15000)
+
+    def switch_workspace(self, name: str) -> None:
+        if self.loading or not name or (self.workspace and name == self.workspace.name): return
+        ws = workspaces.load(name)
+        if ws is None: QMessageBox.warning(self, "Workspace not found", f"The workspace '{name}' could not be read."); self.refresh_workspaces(); return
+        following = self.run_tab.record["system"] if self.run_tab.running() else ""
+        self.save_workspace(); old = self.workspace.name if self.workspace else ""
+        self.load_workspace(ws)
+        if following: self.statusBar().showMessage(f"The run of '{following}' keeps going. It is shown again when you come back to '{old}'.", 10000)
+
+    def new_workspace(self) -> None:
+        name, ok = QInputDialog.getText(self, "New workspace", "Name of the new workspace (for instance the molecule or the project):")
+        if not ok or not name.strip(): return
+        try: ws = workspaces.create(name, profile=self.workspace.profile if self.workspace else "")
+        except ValueError as exc: QMessageBox.warning(self, "Workspace not created", str(exc)); return
+        self.save_workspace(); self.load_workspace(ws); self.go(0)
+
+    def rename_workspace(self) -> None:
+        old = self.workspace.name
+        name, ok = QInputDialog.getText(self, "Rename workspace", "New name:", text=old)
+        if not ok or not name.strip() or name.strip() == old: return
+        self.save_workspace()
+        try: self.workspace = workspaces.rename(old, name)
+        except ValueError as exc: QMessageBox.warning(self, "Workspace not renamed", str(exc)); return
+        self.refresh_workspaces(); self.setWindowTitle(f"SCOPE — {self.workspace.name}")
+
+    def delete_workspace(self) -> None:
+        names = workspaces.list_names(); current = self.workspace.name
+        if len(names) <= 1: QMessageBox.information(self, "Last workspace", "This is the only workspace, so it cannot be deleted."); return
+        if QMessageBox.question(self, "Delete workspace", f"Delete the workspace '{current}'?\n\nOnly the workspace is removed from this window. Its environment, systems, input files, runs and everything on the cluster stay as they are.") != QMessageBox.Yes: return
+        self.save_workspace(); self.load_workspace(workspaces.load(next(n for n in names if n != current)))
+        workspaces.delete(current); self.refresh_workspaces()
+
     def try_last(self, path: str) -> None:
         try: env, info = backend.load_environment(path)
         except Exception: return
@@ -559,7 +654,7 @@ class MainWindow(QMainWindow):
             choice = self.close_choice()
             if choice == "stop": self.run_tab.stop()
             elif choice != "keep": event.ignore(); return
-        self.run_tab.timer.stop(); self.remote_tab.stop_watching()
+        self.save_workspace(); self.run_tab.timer.stop(); self.remote_tab.stop_watching()
         event.accept()
 
 def main(env_path: str=None, check: bool=False) -> int:
