@@ -159,8 +159,12 @@ def gen_g16_subfile(comp: object, queue: object, module: str, procs: int=1, save
     Scheduler stdout/stderr use absolute paths in the computation folder.
     Runs in an isolated directory inside TMPDIR and removes it after copying logs
     and requested checkpoints. A failed copy retains scratch and reports its path.
+    SLURM requests an advance warning 10-60 seconds before the time limit.
+    USR1/TERM/INT stop the calculation before returning partial results; these
+    interruptions exit with code 124 after copying. SIGKILL cannot be handled.
     """
     import shlex
+    from scope.utils.core_tools import gen_run_block, get_slurm_signal_time
     stderr_path = shlex.quote(os.path.abspath(os.path.join(comp.path, comp.name+'.stderr')))
     stdout_path = shlex.quote(os.path.abspath(os.path.join(comp.path, comp.name+'.stdout')))
 
@@ -186,6 +190,7 @@ def gen_g16_subfile(comp: object, queue: object, module: str, procs: int=1, save
             time_limit = getattr(queue._environment,'time_limit',None) # If the user supplies a time limit, it is stored in the environment
             if time_limit is None: time_limit = queue.time_limit       # If not, then it uses the default time limit of the queue.
             print(f"#SBATCH --time={time_limit}", file=sub)
+            print(f"#SBATCH --signal=B:USR1@{get_slurm_signal_time(time_limit)}", file=sub)
             print(f"", file=sub)
             print(f"module load {module}", file=sub)
             print(f"", file=sub)
@@ -213,7 +218,9 @@ def gen_g16_subfile(comp: object, queue: object, module: str, procs: int=1, save
         print(f"echo '%nprocs={procs}' >  tmp1", file=sub)
         print(f"echo '%mem={mem}gb'    >> tmp1", file=sub)
         print(f"cat tmp1 {shlex.quote(comp.inp_name)} > tmp2 && mv -f tmp2 {shlex.quote(comp.inp_name)} || exit 1", file=sub)
-        print(f"{launch_command} < {shlex.quote(comp.inp_name)} > {shlex.quote(comp.out_name)}", file=sub)
+        run_command = f"{launch_command} < {shlex.quote(comp.inp_name)} > {shlex.quote(comp.out_name)}"
+        print('', file=sub)
+        print(gen_run_block(run_command), file=sub)
 
         # Return results before removing the working files, also after a Gaussian error.
         copy_command = 'cp -pr -- *.log "$JOBDIR/"'
@@ -232,6 +239,7 @@ else
     echo "SCOPE: Scratch cleanup failed: $SCRATCHDIR" >&2
     exit 1
 fi''', file=sub)
+        print('\nexit "$run_status"', file=sub)
 
         os.chmod(comp.sub_path, 0o777)
 
