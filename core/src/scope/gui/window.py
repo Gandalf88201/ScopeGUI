@@ -31,6 +31,8 @@ class Session(QObject):
         self.info     = None
         self.reports  = []
         self.progress = {"ran": False, "cluster": False}
+        self._systems = None
+        self.envChanged.connect(self.forget_systems); self.systemsChanged.connect(self.forget_systems)      ## connected first, so it runs before the tabs refresh
 
     def mark(self, key: str, value: bool=True) -> None:
         """Records that a step was completed (a run finished, a cluster test passed) so the left bar can show it."""
@@ -50,8 +52,19 @@ class Session(QObject):
         self.inputsChanged.emit()
 
     def remove_input(self, path: str) -> None:
-        self.reports = [r for r in self.reports if r.path != path]
+        self.remove_inputs([path])
+
+    def remove_inputs(self, paths: list) -> None:
+        drop = set(paths); self.reports = [r for r in self.reports if r.path not in drop]
         self.inputsChanged.emit()
+
+    def systems(self) -> list:
+        """The systems of the current environment (backend.list_systems), scanned once after each change instead of once per tab."""
+        if self._systems is None: self._systems = backend.list_systems(self.info) if self.info else []
+        return self._systems
+
+    def forget_systems(self) -> None:
+        self._systems = None
 
 set_kind = theme.set_kind
 
@@ -142,7 +155,7 @@ class SystemsTab(QWidget):
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.table.itemSelectionChanged.connect(self.show_details)
         self.details = QPlainTextEdit(); self.details.setReadOnly(True)
-        refresh = QPushButton("Refresh"); refresh.clicked.connect(self.refresh)
+        refresh = QPushButton("Refresh"); refresh.clicked.connect(session.systemsChanged.emit)          ## through the session, so the cached list is scanned again
         imp     = QPushButton("Import .xyz…"); imp.setProperty("primary", True); imp.clicked.connect(self.import_xyz)
         row = QHBoxLayout(); row.addWidget(imp); row.addWidget(refresh); row.addStretch(1)
         split = QSplitter(Qt.Vertical); split.addWidget(self.table); split.addWidget(self.details)
@@ -150,7 +163,7 @@ class SystemsTab(QWidget):
         session.systemsChanged.connect(self.refresh)
 
     def refresh(self) -> None:
-        self.rows = backend.list_systems(self.session.info) if self.session.info else []
+        self.rows = self.session.systems()
         self.table.setRowCount(len(self.rows))
         for i, r in enumerate(self.rows):
             for j, text in enumerate([r.name, "yes" if r.file else "missing", ", ".join(r.finished), ", ".join(r.terminated)]): self.table.setItem(i, j, QTableWidgetItem(text))
@@ -268,7 +281,8 @@ class PipelineTab(QWidget):
         if paths: self.session.add_inputs(paths)
 
     def remove(self) -> None:
-        for idx in self.table.selectionModel().selectedRows(): self.session.remove_input(self.session.reports[idx.row()].path)
+        paths = [self.session.reports[idx.row()].path for idx in self.table.selectionModel().selectedRows()]       ## read all rows first: each removal rebuilds the table
+        if paths: self.session.remove_inputs(paths)
 
     def refresh(self) -> None:
         reports = self.session.reports
@@ -309,7 +323,7 @@ class RunTab(QWidget):
     def refresh(self) -> None:
         current = self.system.currentText()
         self.system.clear()
-        if self.session.info: self.system.addItems([r.name for r in backend.list_systems(self.session.info) if r.file])
+        self.system.addItems([r.name for r in self.session.systems() if r.file])
         if current: self.system.setCurrentText(current)
         self.warning.setText("\n".join(w for w in [backend.submission_warning(self.session.info, self.session.reports), *backend.queue_problems(self.session.info, self.session.reports)] if w))
 
@@ -341,7 +355,7 @@ class RunTab(QWidget):
         if state != "running": self.finish(state, code)
 
     def finish(self, state: str, code: "int | None") -> None:
-        self.timer.stop(); text, self.offset = backend.read_log(self.record["log"], self.offset)
+        self.timer.stop(); text, self.offset = backend.read_log(self.record["log"], self.offset, final=True)
         if text.strip("\n"): self.log.appendPlainText(text.rstrip("\n"))
         self.run_btn.setEnabled(True); self.stop_btn.setEnabled(False)
         backend.mark_seen(self.record["id"])
@@ -502,7 +516,7 @@ class MainWindow(QMainWindow):
     def step_done(self, key: str) -> bool:
         s = self.session
         if key == "environment": return s.info is not None and not s.info.missing
-        if key == "systems":     return bool(s.info) and any(r.file for r in backend.list_systems(s.info))
+        if key == "systems":     return any(r.file for r in s.systems())
         if key == "pipeline":    return any(r.ok for r in s.reports)
         if key == "run":         return s.progress["ran"]
         if key == "cluster":     return s.progress["cluster"]

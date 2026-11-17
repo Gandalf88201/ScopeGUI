@@ -139,9 +139,11 @@ def ssh_argv(p: Profile, remote_command: str="bash -l -s") -> list:
 
 @dataclass
 class Result:
+    """What a command on the cluster returned. stdout and stderr are decoded as UTF-8 (undecodable bytes replaced); raw is stdout as bytes."""
     returncode: int
-    stdout:     str = ""
-    stderr:     str = ""
+    stdout:     str   = ""
+    stderr:     str   = ""
+    raw:        bytes = b""
 
     @property
     def ok(self) -> bool:
@@ -150,8 +152,8 @@ class Result:
 def run_script(p: Profile, script: str, timeout: int=60) -> Result:
     """Runs a bash script on the cluster (login shell, script on stdin) and returns its output. Never raises."""
     try:
-        done = subprocess.run(ssh_argv(p), input=script, capture_output=True, text=True, timeout=timeout)
-        return Result(done.returncode, done.stdout, done.stderr)
+        done = subprocess.run(ssh_argv(p), input=script.encode("utf-8"), capture_output=True, timeout=timeout)          ## bytes, not the local locale: log offsets are byte counts
+        return Result(done.returncode, done.stdout.decode("utf-8", errors="replace"), done.stderr.decode("utf-8", errors="replace"), done.stdout)
     except subprocess.TimeoutExpired: return Result(-2, "", f"Timed out after {timeout} s")
     except OSError as exc: return Result(-1, "", str(exc))
 
@@ -344,6 +346,11 @@ def download_items(p: Profile, info: "backend.EnvInfo", system: str) -> list:
     root = p.remote_root.rstrip("/")
     return [(f"{p.host}:{root}/Computations/{system}/", os.path.join(info.computations_path, system) + "/", "computations"), (f"{p.host}:{root}/Systems/{system}/{system}.npy", os.path.join(info.systems_path, system) + "/", "system")]
 
+def duplicate_names(paths: list) -> list:
+    """File names that occur more than once in `paths`. Inputs are uploaded side by side into <project>/inputs, so two files with one name would replace each other."""
+    names = [os.path.basename(x) for x in paths]
+    return sorted({n for n in names if names.count(n) > 1})
+
 def remote_dirs_script(p: Profile, system: str) -> str:
     root = shell_path(p.remote_root.rstrip("/")); s = shlex.quote(system)
     return f"mkdir -p {root}/Sources/{s} {root}/Systems/{s} {root}/Computations/{s} {root}/inputs\n"
@@ -377,31 +384,47 @@ def run_script_text(p: Profile, system: str, remote_inputs: list, quiet: bool=Fa
 ### Runs on the cluster that outlive us ###
 ############################################
 STARTED, BUSY, SIZE, ALIVE, BEGIN, RUNLINE = "__SCOPE_GUI_STARTED__", "__SCOPE_GUI_BUSY__", "__SCOPE_GUI_SIZE__", "__SCOPE_GUI_ALIVE__", "__SCOPE_GUI_BEGIN__", "__SCOPE_GUI_RUN__"
+EXIT_MARKER_REMOTE = backend.EXIT_MARKER
 
-def _logs(p: Profile) -> str:
-    return f"ROOT={shell_path(p.remote_root.rstrip('/'))}"
+def pid_name(system: str) -> str:
+    """The name used for a system in the run files on the cluster (pid file, lock, logs): every character other than a letter, digit, '.', '_' or '-' becomes '_'.
+    Computed here once, so that starting, following, stopping and listing a run all use the same files."""
+    return "".join(ch if (ch.isascii() and (ch.isalnum() or ch in "._-")) else "_" for ch in system)
+
+## Shell lines shared by the run scripts. `alive PID NAME` is true when PID runs and is the wrapper of a run of NAME (its command line holds
+## the log path): a pid left in a file by a run that died hard can be reused by another program, which must not be taken for the run.
+def _common(p: Profile, system: str="") -> list:
+    lines = [f"ROOT={shell_path(p.remote_root.rstrip('/'))}",
+             'alive() { kill -0 "$1" 2>/dev/null || return 1; command -v ps >/dev/null 2>&1 || return 0; ps -ww -p "$1" -o args= 2>/dev/null | grep -qF -- "/logs/run_$2_"; }']
+    if system: lines += [f"N={pid_name(system)}", 'PIDF="$ROOT"/logs/run_"$N".pid', 'LOCK="$ROOT"/logs/run_"$N".lock']
+    return lines
 
 def detached_run_script(p: Profile, system: str, remote_inputs: list, quiet: bool=False, verbose: bool=False, errors: bool=False, set_path: bool=True, stamp: str="") -> str:
     """Starts `scope run` on the cluster so that it does not depend on this window or on the SSH connection.
 
-    The run is started with nohup (and setsid where it exists), reads no input, and writes to <project>/logs/run_<system>_<time>.log;
-    its pid is kept in <project>/logs/run_<system>.pid, which also keeps a second run of the same system from starting. When it ends
-    it appends `__SCOPE_GUI_EXIT__ <code>` to the log and removes the pid file. If the connection drops, the run goes on.
-    Prints `__SCOPE_GUI_STARTED__ <pid> <log>`, or `__SCOPE_GUI_BUSY__ <pid>` if a run of that system is still active.
+    One run per system at a time: the lock is a folder (`mkdir` is atomic, so two starts at the same moment cannot both get it). The run is
+    started with nohup in its own process group (setsid, or job control where setsid is missing), reads no input, and writes to
+    <project>/logs/run_<system>_<time>.log; its pid is kept in <project>/logs/run_<system>.pid. When it ends, or is stopped, it appends
+    `__SCOPE_GUI_EXIT__ <code>` to the log and removes the pid file and the lock. If the connection drops, the run goes on.
+    Prints `__SCOPE_GUI_STARTED__ <pid> <log>`, or `__SCOPE_GUI_BUSY__ <pid>` if a run of that system is active (`starting` when another start holds the lock).
     """
     import time
-    s = shlex.quote(system); stamp = stamp or time.strftime("%Y%m%d_%H%M%S")
+    stamp = stamp or time.strftime("%Y%m%d_%H%M%S")
     inner = run_script_text(p, system, remote_inputs, quiet, verbose, errors, set_path)
-    lines = ["set -e", _logs(p), 'mkdir -p "$ROOT"/logs', f'PIDF="$ROOT"/logs/run_{system}.pid' if backend.SAFE_NAME.match(system) else f'PIDF="$ROOT"/logs/run_$(printf %s {s} | tr -c "A-Za-z0-9._-" _).pid',
-             'if [ -f "$PIDF" ] && kill -0 "$(cat "$PIDF")" 2>/dev/null; then echo "' + BUSY + ' $(cat "$PIDF")"; exit 0; fi',
-             f'LOG="$ROOT"/logs/run_{system}_{stamp}.log' if backend.SAFE_NAME.match(system) else f'LOG="$ROOT"/logs/run_x_{stamp}.log',
+    wrapper = 'trap true TERM; bash "$1" > "$2" 2>&1 < /dev/null; echo "' + EXIT_MARKER_REMOTE + ' $?" >> "$2"; rm -rf "$3" "$4"'      ## TERM: let the run end, then still write the marker and free the lock
+    lines = ["set -e", *_common(p, system), 'mkdir -p "$ROOT"/logs',
+             'if ! mkdir "$LOCK" 2>/dev/null; then',
+             '  if [ -f "$PIDF" ] && alive "$(cat "$PIDF")" "$N"; then echo "' + BUSY + ' $(cat "$PIDF")"; exit 0; fi',
+             '  if [ -z "$(find "$LOCK" -maxdepth 0 -mmin +1 2>/dev/null)" ]; then echo "' + BUSY + ' starting"; exit 0; fi',      ## a start in progress (no pid yet); older than a minute means a start that died
+             '  rm -rf "$LOCK"; mkdir "$LOCK" 2>/dev/null || { echo "' + BUSY + ' starting"; exit 0; }',
+             'fi',
+             f'LOG="$ROOT"/logs/run_"$N"_{stamp}.log',
              'cat > "$LOG".sh <<\'SCOPE_GUI_RUN_BODY\'', inner.rstrip("\n"), "SCOPE_GUI_RUN_BODY",
-             'SETSID=""; command -v setsid >/dev/null 2>&1 && SETSID=setsid',
-             'nohup $SETSID bash -c \'bash "$1" > "$2" 2>&1 < /dev/null; echo "' + EXIT_MARKER_REMOTE + ' $?" >> "$2"; rm -f "$3"\' _ "$LOG".sh "$LOG" "$PIDF" > /dev/null 2>&1 < /dev/null &',
+             "WRAP=" + shlex.quote(wrapper),
+             'if command -v setsid >/dev/null 2>&1; then nohup setsid bash -c "$WRAP" _ "$LOG".sh "$LOG" "$PIDF" "$LOCK" > /dev/null 2>&1 < /dev/null &',
+             'else set -m; nohup bash -c "$WRAP" _ "$LOG".sh "$LOG" "$PIDF" "$LOCK" > /dev/null 2>&1 < /dev/null & set +m; fi',
              'echo $! > "$PIDF"', 'echo "' + STARTED + ' $! $LOG"']
     return "\n".join(lines) + "\n"
-
-EXIT_MARKER_REMOTE = backend.EXIT_MARKER
 
 def parse_started(stdout: str) -> dict:
     """{'state': 'started', 'pid': ..., 'log': ...}, {'state': 'busy', 'pid': ...} or {} when the script printed neither."""
@@ -414,31 +437,36 @@ def parse_started(stdout: str) -> dict:
 
 def poll_script(p: Profile, system: str, log: str, offset: int) -> str:
     """Reads what a cluster run appended to its log after `offset` bytes, and whether it is still alive. Read-only."""
-    pidname = system if backend.SAFE_NAME.match(system) else ""
-    return "\n".join([_logs(p), f'LOG={shell_path(log)}', f'PIDF="$ROOT"/logs/run_{pidname}.pid',
+    return "\n".join([*_common(p, system), f'LOG={shell_path(log)}',
                       f'echo "{SIZE} $(wc -c < "$LOG" 2>/dev/null || echo 0)"',
-                      f'if [ -f "$PIDF" ] && kill -0 "$(cat "$PIDF")" 2>/dev/null; then echo "{ALIVE} 1"; else echo "{ALIVE} 0"; fi',
+                      f'if [ -f "$PIDF" ] && alive "$(cat "$PIDF")" "$N"; then echo "{ALIVE} 1"; else echo "{ALIVE} 0"; fi',
                       f'echo "{BEGIN}"', f'tail -c +{int(offset) + 1} "$LOG" 2>/dev/null || true']) + "\n"
 
-def parse_poll(stdout: str) -> dict:
-    """Splits the answer of poll_script into {'alive': bool, 'text': new log text without the end marker, 'bytes': how many bytes of log were read, 'exit': code or None}."""
-    head, _, body = stdout.partition(BEGIN + "\n")
-    alive = ALIVE + " 1" in head; code = None; keep = []
-    for line in body.split("\n"):
+def parse_poll(stdout: "str | bytes") -> dict:
+    """Splits the answer of poll_script into {'alive': bool, 'text': new log text without the end marker, 'bytes': how many bytes of log were read, 'exit': code or None}.
+
+    Give it the raw bytes (Result.raw): the byte count is then exact, and a character still being written is left for the next poll.
+    """
+    raw = stdout if isinstance(stdout, bytes) else stdout.encode("utf-8")
+    head, _, body = raw.partition(BEGIN.encode() + b"\n")
+    body = body[:backend.complete_utf8(body)]
+    alive = (ALIVE + " 1").encode() in head; code = None; keep = []
+    for line in body.decode("utf-8", errors="replace").split("\n"):
         if line.startswith(backend.EXIT_MARKER):
             try: code = int(line.split()[1])
             except (IndexError, ValueError): code = -1
         else: keep.append(line)
-    return {"alive": alive, "text": "\n".join(keep), "bytes": len(body.encode("utf-8")), "exit": code}
+    return {"alive": alive, "text": "\n".join(keep), "bytes": len(body), "exit": code}
 
 def stop_script(p: Profile, system: str) -> str:
-    """Asks the cluster run of a system to end (its whole process group where there is one)."""
-    return "\n".join([_logs(p), f'PIDF="$ROOT"/logs/run_{system}.pid', 'if [ -f "$PIDF" ]; then PID=$(cat "$PIDF"); kill -TERM -- -"$PID" 2>/dev/null || kill -TERM "$PID" 2>/dev/null; echo stopped; else echo "no run"; fi']) + "\n"
+    """Asks the cluster run of a system to end: its whole process group, only if the pid is still that run."""
+    return "\n".join([*_common(p, system), 'if [ -f "$PIDF" ] && alive "$(cat "$PIDF")" "$N"; then PID=$(cat "$PIDF"); kill -TERM -- -"$PID" 2>/dev/null || kill -TERM "$PID" 2>/dev/null; echo stopped; else echo "no run"; fi']) + "\n"
 
 def list_runs_script(p: Profile) -> str:
-    """Lists the runs of this project that are active, and the most recent logs, so a window opened later can find them. Read-only."""
-    return "\n".join([_logs(p), 'for f in "$ROOT"/logs/run_*.pid; do [ -f "$f" ] || continue; PID=$(cat "$f"); n=$(basename "$f" .pid); n=${n#run_}',
-                      'if kill -0 "$PID" 2>/dev/null; then A=1; else A=0; fi; L=$(ls -t "$ROOT"/logs/run_"$n"_*.log 2>/dev/null | head -1)',
+    """Lists the runs of this project that are active, and the most recent logs, so a window opened later can find them. Read-only.
+    The system names it reports are the pid_name() form."""
+    return "\n".join([*_common(p), 'for f in "$ROOT"/logs/run_*.pid; do [ -f "$f" ] || continue; PID=$(cat "$f"); n=$(basename "$f" .pid); n=${n#run_}',
+                      'if alive "$PID" "$n"; then A=1; else A=0; fi; L=$(ls -t "$ROOT"/logs/run_"$n"_*.log 2>/dev/null | head -1)',
                       f'echo "{RUNLINE} $n $PID $A $L"; done', f'for f in $(ls -t "$ROOT"/logs/run_*_*.log 2>/dev/null | head -5); do echo "__SCOPE_GUI_LOG__ $f"; done']) + "\n"
 
 def parse_runs(stdout: str) -> dict:

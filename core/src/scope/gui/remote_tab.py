@@ -165,7 +165,7 @@ class RemoteTab(QWidget):
     ##### files #####
     def refresh_systems(self) -> None:
         current = self.system.currentText(); self.system.clear()
-        if self.session.info: self.system.addItems([r.name for r in backend.list_systems(self.session.info) if r.file])
+        self.system.addItems([r.name for r in self.session.systems() if r.file])
         if current: self.system.setCurrentText(current)
 
     def need(self) -> "tuple | None":
@@ -173,6 +173,12 @@ class RemoteTab(QWidget):
         if not p: return None
         if not self.session.info or not self.system.currentText(): QMessageBox.information(self, "Choose a system", "Create an environment and import a system first (steps 1 and 2)."); return None
         return p, self.session.info, self.system.currentText()
+
+    def unique_inputs(self, paths: list) -> bool:
+        """Refuses input files that share a file name: on the cluster they all go into one inputs folder and would replace each other."""
+        same = remote.duplicate_names(paths)
+        if same: QMessageBox.warning(self, "Input files with the same name", "These file names are used by more than one input file: " + ", ".join(same) + ".\n\nOn the cluster all inputs go into one folder, so they would replace each other. Rename them in step 3.")
+        return not same
 
     def show_sync(self, results: list, verb: str) -> int:
         total = 0
@@ -187,6 +193,7 @@ class RemoteTab(QWidget):
         got = self.need()
         if not got: return
         p, info, system = got; inputs = [r.path for r in self.session.reports if r.ok]
+        if not self.unique_inputs(inputs): return
         items = remote.upload_items(p, info, system, inputs)
         def work():
             made = remote.run_script(p, remote.remote_dirs_script(p, system))
@@ -219,6 +226,7 @@ class RemoteTab(QWidget):
         if not got: return
         p, info, system = got; valid = [r for r in self.session.reports if r.ok]
         if not valid: QMessageBox.information(self, "No input files", "Create at least one valid input file in step 3."); return
+        if not self.unique_inputs([r.path for r in valid]): return
         submit = [r for r in valid if r.want_submit]
         note = (f"\n\n{len(submit)} input file(s) have want_submit = True: jobs WILL be submitted to the scheduler and use computing time." if submit else "\n\nNo input file asks to submit.")
         missing = remote.unavailable_software(self.lights, valid)
@@ -252,11 +260,12 @@ class RemoteTab(QWidget):
         if self.watching is not w: return                                   # stopped watching meanwhile
         w["polling"] = False
         if not res.ok: self.status.setText("Cannot reach the cluster right now. The run goes on there; trying again…"); return
-        d = remote.parse_poll(res.stdout)
+        d = remote.parse_poll(res.raw or res.stdout)
         if d["text"].strip("\n"): self.log.appendPlainText(d["text"].rstrip("\n")); w["offset"] += d["bytes"]
         if d["exit"] is not None or not d["alive"]:
             self.poll_timer.stop(); self.watching = None; self.unwatch_btn.setEnabled(False); self.stopcl_btn.setEnabled(False); self.run_btn.setEnabled(not self.busy)
-            if d["exit"] is not None:
+            if d["exit"] == 143: self.status.setText("The cluster run was stopped. Run again: SCOPE continues where it stopped.")
+            elif d["exit"] is not None:
                 self.status.setText(f"Cluster run finished with exit code {d['exit']}.")
                 if d["exit"] == 0: self.session.mark("ran")
             else: self.status.setText("The cluster run ended without finishing (stopped or killed). Run again: SCOPE continues where it stopped.")
@@ -288,7 +297,7 @@ class RemoteTab(QWidget):
         def done(found):
             current = self.system.currentText()
             if found["active"]:
-                system, pid, log = next((a for a in found["active"] if a[0] == current), found["active"][0])
+                system, pid, log = next((a for a in found["active"] if a[0] == remote.pid_name(current)), found["active"][0])
                 self.begin_watch(p, system, log, f"Following the active run of '{system}' (process {pid}).")
             elif found["logs"]: self.log.appendPlainText(f"No run is active on the cluster. The latest log is {found['logs'][0]}"); self.status.setText("No active run.")
             else: self.status.setText("No run found on the cluster for this project.")

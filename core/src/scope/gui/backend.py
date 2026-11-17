@@ -9,7 +9,8 @@ import os
 import shutil
 import sys
 import json
-from contextlib   import redirect_stdout
+from collections.abc import Callable
+from contextlib   import contextmanager, redirect_stdout
 from dataclasses  import dataclass, field
 from glob         import glob
 import re
@@ -607,9 +608,27 @@ def load_runs() -> list:
     except Exception: return []
 
 def save_runs(records: list) -> None:
+    """Writes the records, keeping the last 30 and every record not yet seen (so an active run is never dropped)."""
+    keep = [r for i, r in enumerate(records) if i >= len(records) - 30 or not r.get("seen")]
     try:
-        with open(os.path.join(runs_dir(), "runs.json"), "w") as f: json.dump(records[-30:], f, indent=2)       ## only the last 30 are kept
+        with open(os.path.join(runs_dir(), "runs.json"), "w") as f: json.dump(keep, f, indent=2)
     except Exception: pass
+
+@contextmanager
+def runs_lock():
+    """Exclusive lock on the run records, so two windows that update them at the same time do not overwrite each other."""
+    try: import fcntl
+    except ImportError: yield; return                                       ## Windows: no fcntl (local runs need bash anyway)
+    with open(os.path.join(runs_dir(), "runs.lock"), "a") as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        try: yield
+        finally: fcntl.flock(handle, fcntl.LOCK_UN)
+
+def update_runs(change: "Callable[[list], None]") -> list:
+    """Loads the records, lets `change` modify the list in place, and saves it, all under runs_lock. Returns the saved list."""
+    with runs_lock():
+        records = load_runs(); change(records); save_runs(records)
+    return records
 
 def start_detached_local(env_path: str, system: str, inputs: list, quiet: bool=False, verbose: bool=False, errors: bool=False) -> dict:
     """Starts `scope run` so that it does not depend on the window.
@@ -627,15 +646,29 @@ def start_detached_local(env_path: str, system: str, inputs: list, quiet: bool=F
     log   = os.path.join(runs_dir(), f"run_{system}_{stamp}.log")
     proc  = subprocess.Popen(["bash", "-c", WRAPPER, "_", log, program, *args], start_new_session=True, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=child_environment())
     record = {"id": f"{stamp}_{system}", "kind": "local", "system": system, "pid": proc.pid, "log": log, "started": time.time(), "seen": False, "command": "scope " + " ".join(args[2:])}
-    save_runs(load_runs() + [record])
+    update_runs(lambda records: records.append(record))
     return record
 
-def read_log(path: str, offset: int=0) -> tuple:
-    """Returns (new text, new offset): what was appended to the log since `offset` bytes. The end marker line is not part of the text."""
+def complete_utf8(data: bytes) -> int:
+    """Length of the longest start of `data` that does not end inside a UTF-8 character. The bytes of an unfinished character are left for the next read."""
+    end = len(data)
+    for back in range(1, min(4, end) + 1):
+        byte = data[end - back]
+        if byte & 0xC0 != 0x80:                                              ## first byte of the last character (or plain ASCII)
+            need = 2 if byte >> 5 == 0b110 else 3 if byte >> 4 == 0b1110 else 4 if byte >> 3 == 0b11110 else 1
+            return end if back >= need else end - back
+    return end
+
+def read_log(path: str, offset: int=0, final: bool=False) -> tuple:
+    """Returns (new text, new offset): what was appended to the log since `offset` bytes. The end marker line is not part of the text.
+
+    A character that is still being written (its bytes split between two reads) is kept for the next read, unless `final` is set.
+    """
     try:
         with open(path, "rb") as f:
             f.seek(offset); data = f.read()
     except OSError: return "", offset
+    if not final: data = data[:complete_utf8(data)]
     text = data.decode("utf-8", errors="replace")
     return "\n".join(l for l in text.split("\n") if not l.startswith(EXIT_MARKER)), offset + len(data)
 
@@ -663,20 +696,40 @@ def pid_alive(pid: int) -> bool:
     except PermissionError: return True
     return True
 
+_confirmed = set()                                                          ## (pid, log) pairs already matched to their run
+
+def process_command(pid: int) -> str:
+    """Full command line of a process ('' if it cannot be read)."""
+    import subprocess
+    try: return subprocess.run(["ps", "-ww", "-p", str(pid), "-o", "command="], capture_output=True, text=True, timeout=5).stdout.strip()
+    except (OSError, subprocess.TimeoutExpired): return ""
+
+def is_our_run(record: dict) -> bool:
+    """Whether the process with the record's pid is still this run. A pid is reused once its process has ended (for instance after a
+    restart), so the command line of the process is checked once: the run's wrapper carries the path of its log."""
+    pid, log = record["pid"], record["log"]
+    if not pid_alive(pid): _confirmed.discard((pid, log)); return False
+    if (pid, log) in _confirmed: return True
+    command = process_command(pid)
+    if command and log not in command: return False                         ## a different program got this pid
+    if command: _confirmed.add((pid, log))
+    return True                                                             ## ps unavailable: trust the pid, as before
+
 def run_state(record: dict) -> tuple:
     """('running', None), ('finished', exit code) or ('lost', None): the process is gone without writing its end marker (killed, or the computer restarted)."""
     code = exit_code(record["log"])
     if code is not None: return "finished", code
-    return ("running", None) if pid_alive(record["pid"]) else ("lost", None)
+    return ("running", None) if is_our_run(record) else ("lost", None)
 
 def stop_run(record: dict) -> bool:
-    """Asks the whole run (wrapper and `scope run`) to end. Returns whether the signal was sent."""
+    """Asks the whole run (wrapper and `scope run`) to end. Returns whether the signal was sent. Nothing is sent if the pid now belongs to another program."""
     import signal
+    if not is_our_run(record): return False
     try: os.killpg(record["pid"], signal.SIGTERM); return True
     except (ProcessLookupError, PermissionError, OSError): return False
 
 def mark_seen(record_id: str) -> None:
-    records = load_runs()
-    for r in records:
-        if r["id"] == record_id: r["seen"] = True
-    save_runs(records)
+    def change(records: list) -> None:
+        for r in records:
+            if r["id"] == record_id: r["seen"] = True
+    update_runs(change)
