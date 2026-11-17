@@ -162,11 +162,12 @@ class SystemsTab(QWidget):
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows); self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.table.itemSelectionChanged.connect(self.show_details)
-        self.details = QPlainTextEdit(); self.details.setReadOnly(True)
+        from scope.gui.structure_view import StructurePanel
+        self.structure = StructurePanel()                                        ## the structure SCOPE will compute: 3D view, formula, states, 2D drawing
         refresh = QPushButton("Refresh"); refresh.clicked.connect(session.systemsChanged.emit)          ## through the session, so the cached list is scanned again
         imp     = QPushButton("Import .xyz…"); imp.setProperty("primary", True); imp.clicked.connect(self.import_xyz)
         row = QHBoxLayout(); row.addWidget(imp); row.addWidget(refresh); row.addStretch(1)
-        split = QSplitter(Qt.Vertical); split.addWidget(self.table); split.addWidget(self.details)
+        split = QSplitter(Qt.Vertical); split.addWidget(self.table); split.addWidget(self.structure); split.setStretchFactor(0, 1); split.setStretchFactor(1, 3)
         lay = QVBoxLayout(self); lay.addLayout(row); lay.addWidget(split, 1)
         session.systemsChanged.connect(self.refresh)
 
@@ -175,7 +176,8 @@ class SystemsTab(QWidget):
         self.table.setRowCount(len(self.rows))
         for i, r in enumerate(self.rows):
             for j, text in enumerate([r.name, "yes" if r.file else "missing", ", ".join(r.finished), ", ".join(r.terminated)]): self.table.setItem(i, j, QTableWidgetItem(text))
-        self.details.clear()
+        self.structure.clear("Import a system to see its structure here." if not self.rows else "")
+        if self.rows: self.table.selectRow(0)                                     ## show a structure straight away
 
     def import_xyz(self) -> None:
         if not self.session.env: QMessageBox.information(self, "No environment", "Create or open an environment first."); return
@@ -186,12 +188,16 @@ class SystemsTab(QWidget):
         self.session.systemsChanged.emit()
 
     def show_details(self) -> None:
+        """Shows the selected system: its structures (sources and states) in the structure panel, and SCOPE's own description under 'SCOPE details…'."""
+        from scope.gui import structure
         sel = self.table.selectionModel().selectedRows()
         if not sel: return
         r = self.rows[sel[0].row()]
-        if not r.file: self.details.setPlainText("No system binary in this folder."); return
-        try: self.details.setPlainText(backend.system_details(r.file))
-        except Exception as exc: self.details.setPlainText(f"Cannot read {r.file}\n{type(exc).__name__}: {exc}")
+        try: details = backend.system_details(r.file) if r.file else "No system binary in this folder."
+        except Exception as exc: details = f"Cannot read {r.file}\n{type(exc).__name__}: {exc}"
+        found = structure.structures_for(r, self.session.info.sources_path if self.session.info else "")
+        if found: self.structure.set_structures(found, details)
+        else: self.structure.clear("No structure could be read for this system."); self.structure.details.setPlainText(details)
 
 ####################
 ### Pipeline tab ###
