@@ -70,6 +70,24 @@ The light under the **SCOPE** title shows whether this window can start SCOPE, w
 
 The version is read from the installation each time, so it follows an upgrade. The check runs when the window opens, when you return to it after a few minutes, and when you press **Check again**. Click the light for the details (Python, SCOPE and where it is installed, the `scope` command, `cell2mol`, `rdkit`, the settings folder) and, if something is missing, the installation commands.
 
+### Updates of SCOPE
+
+When SCOPE was installed from a git checkout (as `./scope-gui` does), a second line under the light says whether newer code is on GitHub. Click it for the details.
+
+- **The window asks first.** Until you allow it, the window never contacts GitHub; the line reads *Check for SCOPE updates?*. In the window that opens, tick **Check for updates once a day** to allow it. Closing the window without ticking means no; you can tick it later.
+- **The check changes nothing.** It runs `git fetch`, which only updates git's record of what GitHub holds. The line then shows *N updates on origin/main* (or *Up to date*), and the window lists the new commits with their date and title. **Check now** asks GitHub at once.
+- **Update only when it is safe.** **Update** moves your copy forward to the branch it follows (`git merge --ff-only`). It is offered only when nothing of yours would be touched: no uncommitted changes to SCOPE's files, and no commits of your own that GitHub lacks. Otherwise the window says why and which git command to use.
+- **Restart to use the new code.** After an update, **Restart the window** closes it and opens it again; runs keep going. If the update changed SCOPE's installation recipe, start the window with `./scope-gui`, which reinstalls by itself.
+
+| You see | Meaning |
+|---|---|
+| ↑ *3 updates on origin/main* | GitHub has newer code for the branch you follow |
+| ↻ *Up to date with origin/main* | Nothing new since the last check |
+| ! *Update check failed* | GitHub could not be reached (no network, or the repository needs a password); the details say why |
+| no line | SCOPE was installed as a package, not from a checkout: update it the way you installed it |
+
+A branch of your own (for instance a development branch that follows no branch on GitHub) is compared with the main branch of the repository; the window tells you how many new commits it has, and you bring them in with git.
+
 ## Quick start
 
 1. **Environment.** Choose a project folder, for instance `~/scope_project`, and press **Create local environment**.
@@ -291,7 +309,7 @@ Press **Test connection**. It only reads: nothing is changed on the cluster. It 
 
 - SSH and the login shell;
 - Python on the cluster (SCOPE needs 3.12);
-- SCOPE and its version, compared with the version here (a development install reports the same number for different code, so this cannot prove that the code is identical);
+- SCOPE and its version, compared with this computer: when both come from a git checkout the commits are compared, so a different copy of the code is flagged even when the version number is the same (otherwise only the version numbers are compared);
 - the project folder and the cluster environment file, and that the environment's three folders are the `Sources`, `Systems` and `Computations` inside the project folder;
 - the scheduler commands (`sbatch`, `squeue`, `sinfo` for Slurm; `qsub`, `qstat` for SGE);
 - the software, as three lights;

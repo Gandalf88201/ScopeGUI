@@ -177,7 +177,8 @@ class RemoteTab(QWidget):
         self.lights = remote.unchecked_lights("Checking…"); self.checked_at = ""; self.render_lights()
         def work():
             result = remote.run_script(p, remote.probe_script(p), timeout=90)
-            return remote.evaluate_probe(p, result, getattr(scope, "__version__", "")), remote.lights_from_probe(remote.parse_probe(result.stdout))
+            from scope.gui import updates
+            return remote.evaluate_probe(p, result, getattr(scope, "__version__", ""), updates.local_commit()), remote.lights_from_probe(remote.parse_probe(result.stdout))
         self.background(work, self.show_checks, f"Testing {p.host}…")
 
     def render_lights(self) -> None:

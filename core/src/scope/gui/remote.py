@@ -186,6 +186,10 @@ out = {"python": sys.version.split()[0], "host": os.uname().nodename, "user": os
 try:
     import scope
     out["scope_version"], out["scope_file"] = scope.__version__, scope.__file__
+    try:
+        done = subprocess.run(["git", "-C", os.path.dirname(os.path.realpath(scope.__file__)), "log", "-1", "--format=%H %cs"], capture_output=True, text=True, timeout=15, stdin=subprocess.DEVNULL)
+        if done.returncode == 0 and len(done.stdout.split()) == 2: out["scope_commit"], out["scope_commit_date"] = done.stdout.split()
+    except Exception: pass
 except Exception as exc:
     out["scope_error"] = f"{type(exc).__name__}: {exc}"
 root, envfile = os.environ["SCOPE_GUI_ROOT"], os.environ["SCOPE_GUI_ENV"]
@@ -301,8 +305,11 @@ def unavailable_software(lights: list, reports: list) -> list:
         if light and light.state in ("red", "grey"): out.append(f"{os.path.basename(r.path)} needs {light.name}, which is {light.short} on the cluster.")
     return out
 
-def evaluate_probe(p: Profile, result: Result, local_version: str="") -> list:
-    """Turns the output of the probe into the list of checks shown to the user. Explains, and does not guess."""
+def evaluate_probe(p: Profile, result: Result, local_version: str="", local_commit: tuple=("", "")) -> list:
+    """Turns the output of the probe into the list of checks shown to the user. Explains, and does not guess.
+
+    When SCOPE comes from a git checkout both here and on the cluster, the commits are compared (local_commit is (hash, date), see
+    updates.local_commit); otherwise only the version numbers, which a development install does not change."""
     checks = []
     info = parse_probe(result.stdout)
     if not info:
@@ -313,6 +320,10 @@ def evaluate_probe(p: Profile, result: Result, local_version: str="") -> list:
     major, minor = (int(x) for x in info.get("python", "0.0").split(".")[:2])
     checks.append(Check("Python on the cluster", "ok" if (major, minor) == (3, 12) else "warn", f"Python {info.get('python')} (SCOPE needs 3.12)"))
     if "scope_error" in info: checks.append(Check("SCOPE on the cluster", "fail", f"{info['scope_error']}. Check the path of `scope` and that its Python can import it."))
+    elif local_commit[0] and info.get("scope_commit"):
+        here, there = local_commit[0], info["scope_commit"]
+        if here == there: checks.append(Check("SCOPE on the cluster", "ok", f"the same code as here: commit {here[:7]} of {local_commit[1]} ({info.get('scope_file')})."))
+        else: checks.append(Check("SCOPE on the cluster", "warn", f"different code: commit {there[:7]} of {info.get('scope_commit_date')} on the cluster, {here[:7]} of {local_commit[1]} here ({info.get('scope_file')}). Results and system files may differ; update the older copy (git pull in its SCOPE folder)."))
     else:
         same = bool(local_version) and local_version == info.get("scope_version")
         note = "Version numbers match. A development install reports the same number for different code, so this cannot prove the code is identical." if same else f"Version here is {local_version or '?'}; SCOPE files may not load across versions."

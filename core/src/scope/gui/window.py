@@ -11,7 +11,7 @@ from PySide6.QtGui     import QBrush, QColor, QGuiApplication, QPainter, QPalett
 from PySide6.QtCore    import QPointF
 from PySide6.QtWidgets import (QApplication, QButtonGroup, QCheckBox, QDialog, QFrame, QInputDialog, QMenu, QScrollArea, QStackedWidget, QComboBox, QFileDialog, QFormLayout, QGraphicsScene, QGraphicsView, QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMessageBox,
                                QPlainTextEdit, QPushButton, QSplitter, QTableWidget, QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget, QHeaderView, QAbstractItemView)
-from scope.gui import backend, theme, workspaces
+from scope.gui import backend, theme, updates, workspaces
 from scope.gui.tasks import Task
 
 #################
@@ -449,11 +449,13 @@ class LocalScopeDialog(QDialog):
 
 class MainWindow(QMainWindow):
     """Left bar with the five steps, a manual and a theme switch; the selected step fills the rest of the window."""
-    localChecked = Signal()
+    localChecked   = Signal()
+    updatesChecked = Signal()
 
     def __init__(self, env_path: str=None):
         super().__init__()
         self.local, self.local_checked_at, self.local_task = backend.LocalScope(), 0.0, None
+        self.update_status, self.update_task, self.update_repo, self.updated, self.update_message = None, None, None, False, ""     ## update_repo None: the checkout SCOPE is imported from
         self.setWindowTitle("SCOPE"); self.resize(1240, 800)
         self.session = Session()
         theme.apply(QApplication.instance(), backend.load_gui_config().get("theme", "auto"))
@@ -476,7 +478,8 @@ class MainWindow(QMainWindow):
         side = QFrame(); side.setObjectName("sidebar"); side.setFixedWidth(240); sl = QVBoxLayout(side); sl.setContentsMargins(0, 18, 0, 14); sl.setSpacing(2)
         brand = QLabel("SCOPE"); brand.setObjectName("brand"); brandsub = QLabel("workflow assistant"); brandsub.setObjectName("brandsub")
         self.local_label = ClickLabel(); self.local_label.setCursor(Qt.PointingHandCursor); self.local_label.setObjectName("localstatus"); self.local_label.setTextFormat(Qt.RichText); self.local_label.clicked.connect(self.show_local)
-        bl = QVBoxLayout(); bl.setContentsMargins(18, 0, 0, 14); bl.setSpacing(0); bl.addWidget(brand); bl.addWidget(brandsub); bl.addSpacing(8); bl.addWidget(self.local_label); sl.addLayout(bl)
+        self.update_label = ClickLabel(); self.update_label.setCursor(Qt.PointingHandCursor); self.update_label.setObjectName("localstatus"); self.update_label.setTextFormat(Qt.RichText); self.update_label.clicked.connect(self.show_updates); self.update_label.hide()
+        bl = QVBoxLayout(); bl.setContentsMargins(18, 0, 0, 14); bl.setSpacing(0); bl.addWidget(brand); bl.addWidget(brandsub); bl.addSpacing(8); bl.addWidget(self.local_label); bl.addWidget(self.update_label); sl.addLayout(bl)
         ws_label = QLabel("WORKSPACE"); ws_label.setObjectName("wslabel")
         self.ws_combo = QComboBox(); self.ws_combo.setObjectName("wscombo"); self.ws_combo.setToolTip("The project shown: its environment, input files and project on the cluster. Runs keep going whichever workspace is shown.")
         self.ws_combo.setMinimumContentsLength(8); self.ws_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
@@ -500,9 +503,9 @@ class MainWindow(QMainWindow):
         root = QWidget(); rl = QHBoxLayout(root); rl.setContentsMargins(0, 0, 0, 0); rl.setSpacing(0); rl.addWidget(side); rl.addWidget(self.tabs, 1); self.setCentralWidget(root)
         self.statusBar().showMessage("Local mode: no scheduler is used unless the environment says so.")
         for signal in (self.session.envChanged, self.session.systemsChanged, self.session.inputsChanged, self.session.progressChanged): signal.connect(self.update_steps)
-        theme.on_change(self.on_theme); theme.on_change(self.render_local); self.on_theme(); self.render_local()
+        theme.on_change(self.on_theme); theme.on_change(self.render_local); theme.on_change(self.render_updates); self.on_theme(); self.render_local()
         QGuiApplication.instance().applicationStateChanged.connect(self.on_app_state)
-        self.check_local()
+        self.check_local(); self.check_updates(fetch=updates.due())            ## GitHub is asked only once the user allowed the daily check
         self.go(0); self.update_steps()
         self.loading, self.workspace = False, None
         for signal in (self.session.envChanged, self.session.inputsChanged, self.remote_tab.projectChanged): signal.connect(self.save_workspace)
@@ -536,6 +539,57 @@ class MainWindow(QMainWindow):
     def on_app_state(self, state) -> None:
         """Checks again when the window comes back to the front after a while, so an upgrade of SCOPE shows without restarting."""
         if state == Qt.ApplicationActive and time.time() - self.local_checked_at > 120: self.check_local()
+        if state == Qt.ApplicationActive and updates.due(): self.check_updates(fetch=True)
+
+    ##### updates of SCOPE #####
+    def check_updates(self, fetch: bool=False) -> None:
+        """Compares this copy of SCOPE with GitHub in a worker thread: with fetch=True GitHub is asked (network), otherwise only what the last check brought is used."""
+        if self.update_task is not None: return
+        if fetch: self.update_label.setText(f'<span style="color:{theme.colors()["sidebar_sub"]}">↻&nbsp; checking for updates…</span>'); self.update_label.show()
+        repo = self.update_repo
+        task = Task(lambda: updates.status(repo, fetch=fetch)); self.update_task = task
+        task.signals.done.connect(self.updates_done); task.signals.failed.connect(lambda m: self.updates_done(updates.UpdateStatus(repo=repo or "", error=m)))
+        QThreadPool.globalInstance().start(task); self.updatesChecked.emit()
+
+    def updates_done(self, st) -> None:
+        self.update_status, self.update_task = st, None
+        if st.fetched: updates.save_setting(last=st.checked)                 ## also after a failure: the daily check does not retry at every start
+        self.render_updates(); self.updatesChecked.emit()
+
+    def render_updates(self) -> None:
+        """The line under the SCOPE light: updates found (accent), up to date (quiet), check failed (amber), or the question whether to check at all."""
+        st, c = self.update_status, theme.colors()
+        if self.update_task is not None and st is None: return
+        if st is None or not st.repo: self.update_label.hide(); return
+        kind, text = st.summary(); enabled = updates.setting().get("enabled")
+        if self.updated: kind, text = "new", "Updated: restart to use it"
+        elif enabled is None and kind != "new": kind, text = "ask", "Check for SCOPE updates?"
+        elif enabled is False and kind == "info": text += " · daily check off"
+        colour = {"new": c["accent"], "ask": c["accent"], "warn": c["warn"]}.get(kind, c["sidebar_sub"]); glyph = {"new": "↑", "warn": "!"}.get(kind, "↻")
+        self.update_label.setText(f'<span style="color:{colour}">{glyph}&nbsp; {text}</span>'); self.update_label.show()
+        self.update_label.setToolTip("Click for details: what is new on GitHub, the daily check, and Update.")
+
+    def show_updates(self) -> None:
+        from scope.gui.update_view import UpdatesDialog
+        UpdatesDialog(self, self).exec()
+
+    def apply_update(self) -> None:
+        """Moves this copy forward (fast-forward only) in a worker thread; updates.update checks again that nothing local is affected."""
+        if self.update_task is not None or not self.update_status: return
+        repo = self.update_status.repo; task = Task(lambda: updates.update(repo)); self.update_task = task
+        task.signals.done.connect(self.update_applied); task.signals.failed.connect(lambda m: self.update_applied((False, f"Update failed: {m}", False)))
+        QThreadPool.globalInstance().start(task); self.updatesChecked.emit()
+
+    def update_applied(self, result) -> None:
+        ok, message, recipe = result; self.update_task = None; self.updated = self.updated or ok
+        if ok and recipe: message += ' The installation recipe changed: start the window with ./scope-gui, which reinstalls by itself (or run pip install -e "core[gui]").'
+        if ok: message += " Restart the window to use the new code; runs keep going."
+        self.update_message = message; self.check_updates(fetch=False)
+
+    def restart(self) -> None:
+        """Closes the window (asking first if a run is shown, as usual) and opens a new one with the code now on disk."""
+        from PySide6.QtCore import QProcess
+        if self.close(): QProcess.startDetached(sys.executable, ["-c", "from scope.cli.main import main; main()", "gui"])
 
     def go(self, index: int) -> None:
         """Shows step `index` (0-based; len(STEPS) is the manual)."""
