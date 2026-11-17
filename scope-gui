@@ -1,0 +1,93 @@
+#!/usr/bin/env bash
+# scope-gui: opens the SCOPE graphical interface from a source checkout, with nothing to set up by hand.
+#
+# The first time, it finds a Python 3.12, creates a private virtual environment, installs SCOPE (editable, with the
+# GUI extra) from this folder and opens the window. Later starts reuse the environment and are immediate. It is
+# reinstalled by itself when core/pyproject.toml changes (for instance after `git pull`).
+#
+#   ./scope-gui                  open the GUI
+#   ./scope-gui -n env.npy       open the GUI with an Environment file
+#   ./scope-gui --check          build the window, print one line and exit (tests the installation)
+#   ./scope-gui --reinstall      reinstall SCOPE into the private environment, then open the GUI
+#   ./scope-gui --where          print where the private environment lives, and exit
+#
+# SCOPE_GUI_HOME=/some/folder    keeps the private environment somewhere else
+# SCOPE_GUI_PYTHON=/path/python  uses that Python (must be 3.12) instead of searching for one
+set -u
+
+here="$0"
+while [ -L "$here" ]; do                                    # followed when the script is symlinked into ~/bin
+    target="$(readlink "$here")"
+    case "$target" in /*) here="$target" ;; *) here="$(dirname "$here")/$target" ;; esac
+done
+root="$(cd "$(dirname "$here")" && pwd)"
+core="$root/core"
+[ -f "$core/pyproject.toml" ] || { echo "scope-gui: cannot find core/pyproject.toml next to this script ($root)." >&2; exit 1; }
+
+if [ -n "${SCOPE_GUI_HOME:-}" ]; then home="$SCOPE_GUI_HOME"
+elif [ "$(uname -s)" = "Darwin" ]; then home="$HOME/Library/Application Support/scope/launcher"
+else home="${XDG_DATA_HOME:-$HOME/.local/share}/scope/launcher"; fi
+venv="$home/venv"
+stamp="$home/installed.stamp"
+
+reinstall=0; passthrough=()
+for arg in "$@"; do
+    case "$arg" in
+        --where)     echo "$venv"; exit 0 ;;
+        --reinstall) reinstall=1 ;;
+        *)           passthrough+=("$arg") ;;
+    esac
+done
+
+is_312() { "$1" -c 'import sys; sys.exit(0 if sys.version_info[:2] == (3, 12) else 1)' >/dev/null 2>&1; }
+
+find_python() {
+    if [ -n "${SCOPE_GUI_PYTHON:-}" ]; then
+        is_312 "$SCOPE_GUI_PYTHON" && { echo "$SCOPE_GUI_PYTHON"; return 0; }
+        echo "scope-gui: SCOPE_GUI_PYTHON=$SCOPE_GUI_PYTHON is not a Python 3.12." >&2; return 1
+    fi
+    for candidate in python3.12 /opt/homebrew/bin/python3.12 /usr/local/bin/python3.12 /opt/local/bin/python3.12 python3 python; do
+        found="$(command -v "$candidate" 2>/dev/null)" || continue
+        is_312 "$found" && { echo "$found"; return 0; }
+    done
+    return 1
+}
+
+fingerprint() { cksum < "$core/pyproject.toml" | awk '{print $1 "-" $2}'; }
+
+if [ -x "$venv/bin/python" ] && ! is_312 "$venv/bin/python"; then
+    echo "scope-gui: the private environment in $venv is not Python 3.12 (was Python replaced?). Delete that folder and run ./scope-gui again." >&2; exit 1
+fi
+
+if [ ! -x "$venv/bin/python" ]; then
+    py="$(find_python)" || {
+        [ -n "${SCOPE_GUI_PYTHON:-}" ] && exit 1                 # the message about SCOPE_GUI_PYTHON was already printed
+        cat >&2 <<'EOF'
+scope-gui: SCOPE needs Python 3.12 (not 3.11, not 3.13) and none was found.
+Install it, then run ./scope-gui again:
+  macOS (Homebrew):  brew install python@3.12
+  Linux (Debian):    sudo apt install python3.12 python3.12-venv
+  any system:        conda create -n scope python=3.12   (then: conda activate scope, and set SCOPE_GUI_PYTHON=$(which python))
+EOF
+        exit 1
+    }
+    echo "scope-gui: first start. Creating the private environment with $py in $venv"
+    mkdir -p "$home" || exit 1
+    "$py" -m venv "$venv" || { echo "scope-gui: could not create the environment (on Debian/Ubuntu install python3.12-venv)." >&2; exit 1; }
+    reinstall=1
+fi
+
+if [ "$reinstall" = 0 ] && [ "$(cat "$stamp" 2>/dev/null)" != "$(fingerprint)" ]; then
+    echo "scope-gui: core/pyproject.toml changed, updating the installation."
+    reinstall=1
+fi
+
+if [ "$reinstall" = 1 ]; then
+    echo "scope-gui: installing SCOPE and the GUI from $core (internet needed; the first time takes a few minutes)."
+    rm -f "$stamp"
+    "$venv/bin/python" -m pip install --disable-pip-version-check -e "$core[gui]" || {
+        echo "scope-gui: the installation failed. Check the internet connection and run ./scope-gui again (use ./scope-gui --reinstall to retry from scratch)." >&2; exit 1; }
+    fingerprint > "$stamp"
+fi
+
+exec "$venv/bin/python" -c "from scope.cli.main import main; main()" gui ${passthrough[@]+"${passthrough[@]}"}
