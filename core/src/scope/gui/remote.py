@@ -3,8 +3,9 @@
 SCOPE has to run where the scheduler is, so the GUI drives a SCOPE installed on the cluster over SSH and moves
 files with rsync. It uses the system `ssh` and `rsync` as they are: keys, ~/.ssh/config, jump hosts and 2FA stay
 the user's business, and no password is ever stored. Every command runs with BatchMode (no prompt that could hang);
-for password or 2FA clusters the user opens one connection in a terminal (`master_command`) and the GUI reuses it
-through a ControlMaster socket.
+for password or 2FA clusters the user presses Connect…: `open_connection` runs one ssh that may ask questions, relays
+them to a dialog, and leaves a ControlMaster socket that every other command reuses. (The same connection can be opened
+in a terminal with `master_command`.) The password is passed to ssh and forgotten; it is never stored or logged.
 
 Nothing here contacts a host by itself: each function is called by an explicit user action.
 """
@@ -13,6 +14,7 @@ import os
 import re
 import shlex
 import subprocess
+import sys
 from dataclasses import asdict, dataclass, field
 from scope.gui import backend
 
@@ -202,6 +204,120 @@ def master_command(p: Profile) -> str:
     It carries the same port and user as the GUI's commands, so both name the same socket (%C hashes host, port and user)."""
     return " ".join(["ssh -M -N -f", f"-o ControlPath={control_path()}", "-o ControlPersist=4h", *[shlex.quote(o) for o in account_options(p)], shlex.quote(p.host)])
 
+def master_options(p: Profile) -> list:
+    """Options of the connection the GUI opens itself (Connect…): a master that stays in the background for 4 hours and that every other command reuses.
+    The socket name is the one of ssh_options and master_command, so all of them share it. No BatchMode: this is the one command that may ask questions."""
+    return ["-M", "-N", "-f", "-o", "BatchMode=no", "-o", "ConnectTimeout=20", "-o", "ServerAliveInterval=30", "-o", f"ControlPath={control_path()}", "-o", "ControlPersist=4h", *account_options(p)]
+
+def control_argv(p: Profile, operation: str) -> list:
+    """`ssh -O check|exit` for the shared connection of this account. It talks to the local socket only: nothing is sent to the cluster."""
+    return [ssh_exe(), "-O", operation, "-o", f"ControlPath={control_path()}", *account_options(p), p.host]
+
+def connection_alive(p: Profile, timeout: int=5) -> bool:
+    """True when a shared connection to this account is open (from Connect…, or from the terminal command). Contacts no host."""
+    if not p.host: return False
+    try: return subprocess.run(control_argv(p, "check"), capture_output=True, stdin=subprocess.DEVNULL, timeout=timeout).returncode == 0
+    except (OSError, subprocess.TimeoutExpired): return False
+
+def close_connection(p: Profile, timeout: int=10) -> bool:
+    """Closes the shared connection (the cluster sees a normal logout). True when it is closed afterwards."""
+    try: subprocess.run(control_argv(p, "exit"), capture_output=True, stdin=subprocess.DEVNULL, timeout=timeout)
+    except (OSError, subprocess.TimeoutExpired): pass
+    return not connection_alive(p)
+
+def can_login_here() -> bool:
+    """Connect… needs a pseudo-terminal, which ssh insists on for passwords: macOS and Linux have one, Windows does not."""
+    return os.name == "posix"
+
+def auth_failed(res: "Result") -> bool:
+    """True when a command failed only because the cluster wants a login (no key, no open shared connection)."""
+    return res.returncode == 255 and "permission denied" in res.stderr.lower()
+
+## Runs ssh on a pseudo-terminal and relays its questions. It is a separate small program (and not a fork inside the GUI) so that no thread
+## of the GUI is copied. Questions go to the GUI as JSON lines on stdout, answers come back on stdin: a password is never put in an argument,
+## an environment variable or a file, and the helper blanks every answer from the text it reports.
+LOGIN_HELPER = r'''
+import json, os, pty, re, select, signal, sys, time
+argv, patience = json.loads(sys.argv[1]), float(sys.argv[2])
+def say(obj): sys.stdout.write(json.dumps(obj) + "\n"); sys.stdout.flush()
+pid, fd = pty.fork()
+if pid == 0:
+    try: os.execvp(argv[0], argv)
+    except OSError as exc: os.write(2, str(exc).encode())
+    os._exit(127)
+given, shown, buf, last = [], [], "", time.time()
+def scrub(text):
+    for a in given:
+        if len(a) >= 3: text = text.replace(a, "***")
+    return text
+def finish(code, extra=""):
+    say({"type": "done", "code": code, "text": scrub("\n".join(shown + [buf, extra])).strip()[-1500:]}); sys.exit(0)
+def reap(block=False):
+    try: done, st = os.waitpid(pid, 0 if block else os.WNOHANG)
+    except ChildProcessError: return True, 0
+    return (done != 0), (os.waitstatus_to_exitcode(st) if done else None)
+while True:
+    ready = select.select([fd], [], [], 0.3)[0]
+    if ready:
+        try: chunk = os.read(fd, 4096)
+        except OSError: chunk = b""
+        if chunk: buf += chunk.decode("utf-8", "replace").replace("\r", ""); last = time.time()
+        else: time.sleep(0.05)
+    over, code = reap()
+    if over:
+        try:
+            while select.select([fd], [], [], 0.1)[0]:
+                chunk = os.read(fd, 4096)
+                if not chunk: break
+                buf += chunk.decode("utf-8", "replace").replace("\r", "")
+        except OSError: pass
+        finish(code)
+    tail = buf.rsplit("\n", 1)[-1]
+    if not ready and tail.strip() and re.search(r"[:?]\s*$", tail) and time.time() - last > 0.25:
+        context = "\n".join(l for l in buf.rsplit("\n", 1)[0].split("\n") if l.strip())[-1500:]
+        prompt = tail.strip(); kind = "confirm" if "(yes/no" in prompt else "secret"
+        say({"type": "prompt", "context": scrub(context), "prompt": prompt, "kind": kind})
+        line = sys.stdin.readline(); msg = json.loads(line) if line.strip() else {"cancel": True}
+        if msg.get("cancel"):
+            try: os.kill(pid, signal.SIGTERM)
+            except OSError: pass
+            reap(block=True); finish(130, "Cancelled.")
+        answer = str(msg.get("answer", "")); given.append(answer); shown.append(context)
+        os.write(fd, (answer + "\n").encode("utf-8")); buf = ""; last = time.time()
+    elif not ready and time.time() - last > patience:
+        try: os.kill(pid, signal.SIGTERM)
+        except OSError: pass
+        reap(block=True); finish(124, "Timed out waiting for the cluster.")
+'''
+
+def open_connection(p: Profile, ask: "Callable[[str, str, str], str | None]", patience: int=120) -> "Result":
+    """Opens the shared connection, answering what ssh asks (host key, password, verification code) through `ask(context, prompt, kind)`.
+
+    kind is 'secret' (a password or code: mask it) or 'confirm' (the first-time host key question: answer yes or no). `ask` returns the answer, or None to cancel.
+    It is called from the thread that runs this function, and may block as long as the user needs. Nothing is stored: the answer goes to ssh on a
+    pseudo-terminal and is forgotten. `patience` is how long ssh may stay silent after an answer. Returns Result(0) when the connection is open."""
+    if not can_login_here(): return Result(-1, "", "Entering a password in this window needs macOS or Linux. Use the terminal command instead.")
+    argv = [ssh_exe(), *master_options(p), p.host]
+    try: proc = subprocess.Popen([sys.executable, "-I", "-c", LOGIN_HELPER, json.dumps(argv), str(patience)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, bufsize=1)
+    except OSError as exc: return Result(-1, "", str(exc))
+    code, text = -1, ""
+    try:
+        for line in proc.stdout:
+            try: msg = json.loads(line)
+            except ValueError: continue
+            if msg.get("type") == "prompt":
+                answer = ask(msg.get("context", ""), msg.get("prompt", ""), msg.get("kind", "secret"))
+                proc.stdin.write(json.dumps({"cancel": True} if answer is None else {"answer": answer}) + "\n"); proc.stdin.flush()
+            elif msg.get("type") == "done": code, text = int(msg.get("code", -1)), msg.get("text", "")
+    except (BrokenPipeError, OSError): pass
+    finally:
+        try: proc.stdin.close()
+        except OSError: pass
+        try: proc.wait(timeout=10)
+        except subprocess.TimeoutExpired: proc.kill()
+    if code == 0 and not connection_alive(p): return Result(1, "", text or "ssh finished but no shared connection is open.")
+    return Result(code, "", text)
+
 def ssh_argv(p: Profile, remote_command: str="bash -l -s") -> list:
     """Arguments to start a remote login shell that reads its script from standard input."""
     return [ssh_exe(), *ssh_options(p), p.host, remote_command]
@@ -369,7 +485,7 @@ def evaluate_probe(p: Profile, result: Result, local_version: str="", local_comm
     info = parse_probe(result.stdout)
     if not info:
         why = result.stderr.strip().splitlines()[-1] if result.stderr.strip() else f"exit code {result.returncode}"
-        hint = " If the cluster needs a password or a second factor, run the terminal command shown and test again." if result.returncode == 255 else ""
+        hint = " If the cluster needs a password or a second factor, press Connect… (or run the terminal command shown) and test again." if result.returncode == 255 else ""
         return [Check("SSH connection", "fail", f"Could not run a command on {p.host}: {why}.{hint}")]
     checks.append(Check("SSH connection and login shell", "ok", f"{info.get('user', '?')}@{info.get('host', '?')}"))
     major, minor = (int(x) for x in info.get("python", "0.0").split(".")[:2])

@@ -262,13 +262,13 @@ Runs of different systems can go on at the same time, whether they share an envi
 
 Most calculations run on a cluster. SCOPE must be installed on the cluster and runs there. This window starts it over SSH and moves files with `rsync`.
 
-> **Note.** Your SSH setup is used as it is (keys, `~/.ssh/config`, jump hosts). This program never stores a password. Nothing is sent to the cluster until you press a button.
+> **Note.** Your SSH setup is used as it is (keys, `~/.ssh/config`, jump hosts). This program never stores a password: when the cluster asks for one, you type it in a window, it goes to the cluster and is forgotten. Nothing is sent to the cluster until you press a button.
 
 ### Before the first test
 
 Three things must exist on the cluster.
 
-1. **SSH works from your Terminal.** `ssh <host>` logs you in, with a key, or with a password or second factor.
+1. **You can log in over SSH.** `ssh <host>` works from your Terminal, with a key, or with a password or second factor. This window can do the same login for you (see *Connect*).
 2. **SCOPE is installed**, in its own Python 3.12 environment. For example:
 
 ```
@@ -284,9 +284,9 @@ The module names you give there are what SCOPE uses to find Gaussian 16 and Quan
 
 ### Set up a profile
 
-The page has two parts. The **profile** (top) is the connection to one cluster and is shared by all workspaces. The **project on the cluster** (below it) belongs to the workspace shown, so each workspace can use its own folder on the same cluster.
+The page is grouped in cards. **1 · Connection** is the profile: the connection to one cluster, shared by all workspaces, with the buttons **Connect…**, **Disconnect**, **Test connection** and **Save profile**. **2 · SCOPE on the cluster** says where `scope` is. **3 · Project on the cluster** belongs to the workspace shown, so each workspace can use its own folder on the same cluster. **Status and checks** and **Transfer and run** come below.
 
-Press **New** (or start typing, the first time), fill in the connection and press **Save profile**. Then fill in the project fields: they are saved with the workspace as you type. The yellow hint under the fields says what is still missing; it turns into a green tick when both parts are complete.
+Press **New** (or start typing, the first time), fill in the connection and press **Save profile**. If the cluster needs a password, press **Connect…** now. Then fill in the project fields: they are saved with the workspace as you type. The yellow hint under the fields says what is still missing; it turns into a green tick when both parts are complete.
 
 | Field | Part | What to write | Example |
 |---|---|---|---|
@@ -295,7 +295,7 @@ Press **New** (or start typing, the first time), fill in the connection and pres
 | User | Profile | Your login name on the cluster. Leave empty if `~/.ssh/config` already gives it, or if it is the same as on this computer. | `jsmith` |
 | Port | Profile | The SSH port. Leave empty for the usual 22 (or the one in `~/.ssh/config`). Some clusters use another one. | `2122` |
 | Path of scope on the cluster | Profile | Where the `scope` program is. Prefer this field. | `~/miniconda3/envs/scope/bin/scope` |
-| Line that makes scope available | Profile | Only if the path field is empty, for example `module load scope`. `conda activate` often does not work in this kind of shell, which is why the path is preferred. | |
+| Line that makes scope available (under *Advanced*) | Profile | Only if the path field is empty, for example `module load scope`. `conda activate` often does not work in this kind of shell, which is why the path is preferred. | |
 | Project folder on the cluster | Workspace | The folder that holds `Sources`, `Systems` and `Computations` | `~/scope_projects/water` |
 | Cluster environment file | Workspace | The `scope_env_*.npy` made by `scope config` | `~/scope_projects/water/scope_env_cluster.npy` |
 
@@ -303,9 +303,17 @@ Press **New** (or start typing, the first time), fill in the connection and pres
 
 > **Tip.** To find the values, log in and run `which scope` (the path of `scope`) and `pwd` inside the project folder. Paths start with `/` or `~/`, with no spaces and no `$VARIABLES`.
 
-### Password or second factor
+### Connect
 
-This window cannot answer a password or code prompt. Press **Show terminal command**, copy the command (it already contains the port and the user of the profile), run it once in the Terminal app and log in. It opens a connection that stays open for a few hours, and this window reuses it. Keys without a password need no such step.
+Press **Connect…**. This window logs in the way your Terminal does, and shows what the cluster asks:
+
+- **A password or a verification code** appears in a small window, with what the cluster said just before (for example *Permission denied, please try again.*). The text is hidden while you type; tick *Show what I type* to see it. A cluster that asks for a password and then a code (a second factor) opens the window twice.
+- **The first time you log in to a cluster**, ssh asks whether to trust it. The window shows the key fingerprint. Press **Yes** only if it is the one your cluster support gives.
+- **Cancel** stops the login and nothing is connected.
+
+Nothing you type is saved: it is passed to ssh and forgotten, never written to a file, a log or the profile. When the login works, the connection stays open for 4 hours, the badge at the top right of the card says **Connected to** and the host name, and every button on the page (test, upload, run, download) reuses it without asking again. **Disconnect** closes it; a run already started on the cluster keeps going. When the 4 hours pass, or the cluster closes the connection, the badge turns to *Not connected* and the next button that needs the cluster tells you to press **Connect…** again. A key without a password needs no such step: the badge may stay *Not connected* and the buttons still work.
+
+If you prefer to type the password in the Terminal (or **Connect…** is not available on your computer), press **Terminal command…**, copy the command (it already contains the port and the user of the profile), run it once in the Terminal app and log in. The window reuses that connection too.
 
 ### Test connection
 
@@ -446,7 +454,7 @@ Worth knowing:
 | A system name with a space | Job submission splits the name in two | Rename the `.xyz` file, with no spaces |
 | The environment shows *folder(s) not found* | The environment was made on another computer | Create a local one, or open the cluster one on the cluster |
 | Nothing is written when you run on your own computer | There is no scheduler, so SCOPE does not generate inputs | Use the Cluster step |
-| The cluster test fails at SSH | Host unknown, key not loaded, or password or second factor needed | Check `~/.ssh/config`. For a second factor, use **Show terminal command**. |
+| The cluster test fails at SSH, with *Permission denied* | A password or second factor is needed, or the connection expired | Press **Connect…** and answer in the window. Check the user and the port. |
 | A light is grey: *not set* | The cluster environment names no module for that software | On the cluster, run `scope config` again and give the module name |
 | A light is red: *module fails* | The module name in the cluster environment is wrong or cannot be loaded | Run `module avail` on the cluster, then correct the name with `scope config` |
 | Quantum ESPRESSO is amber: *no MPI launcher* | `pw.x` was found but no `mpirun`, `mpiexec` or `srun` is visible after loading the module | Check the module, or ask the cluster support which launcher to use |

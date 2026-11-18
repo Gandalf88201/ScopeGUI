@@ -90,6 +90,8 @@ def stylesheet(c: dict) -> str:
     QLabel[kind="err"] {{ color: {c['err']}; font-weight: 600; }}
     QLabel#pagetitle {{ font-size: 22px; font-weight: 700; color: {c['text']}; }}
     QLabel#pagesub {{ color: {c['sub']}; }}
+    QPushButton#linkbtn {{ background: transparent; border: none; color: {c['accent']}; padding: 2px 0; text-align: left; }}
+    QPushButton#linkbtn:hover {{ text-decoration: underline; }}
     QLabel#sectiontitle {{ color: {c['text']}; font-weight: 700; padding-top: 8px; }}
     QLabel#wslabel {{ color: {c['sidebar_sub']}; font-size: 10px; font-weight: 600; letter-spacing: 1px; }}
     QComboBox#wscombo {{ background: rgba(255,255,255,0.08); color: {c['sidebar_text']}; border: 1px solid rgba(255,255,255,0.18); border-radius: 6px; padding: 4px 8px; }}
