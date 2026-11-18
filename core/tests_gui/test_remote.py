@@ -1,5 +1,6 @@
 """Tests of the remote layer against a fake `ssh` that runs the command on this computer. No real host is contacted."""
 import os
+import re
 import stat
 import sys
 import pytest
@@ -24,13 +25,22 @@ def isolated(tmp_path, monkeypatch):
     monkeypatch.setenv("SCOPE_GUI_SSH", str(fake))
     monkeypatch.delenv("FAKE_SSH_FAIL", raising=False)
 
+def scope_link(folder) -> str:
+    """The `scope` program of this Python. The GUI rejects a cluster path with a space, and the Python that runs the tests may live
+    in one (for instance ~/Library/Application Support/... on macOS): then the whole environment folder is reached through a link
+    in `folder`, so that `bin/scope`, `bin/python` (which the probe looks for next to scope) and pyvenv.cfg stay together."""
+    bin_dir = os.path.dirname(sys.executable); real = os.path.join(bin_dir, "scope")
+    if not re.search(r"\s", real): return real
+    os.makedirs(folder, exist_ok=True); link = os.path.join(folder, "env")
+    if not os.path.lexists(link): os.symlink(os.path.dirname(bin_dir), link)
+    return os.path.join(link, os.path.basename(bin_dir), "scope")
+
 @pytest.fixture
 def cluster(tmp_path):
     """A 'cluster': a project folder with its own environment, and a profile that points to it."""
     root = tmp_path / "cluster_proj"
     env, info = backend.create_environment("cl", str(root / "Sources"), str(root / "Systems"), str(root / "Computations"), str(root))
-    scope_bin = os.path.join(os.path.dirname(sys.executable), "scope")
-    return remote.Profile("fake", "fakehost", scope_bin, "", str(root), info.filepath)
+    return remote.Profile("fake", "fakehost", scope_link(str(tmp_path / "bin")), "", str(root), info.filepath)
 
 @pytest.fixture
 def local(tmp_path):

@@ -71,7 +71,7 @@ def test_export_and_import_keep_everything_and_never_replace_a_connection(local,
     remote.save_profile(remote.Profile("hpc", "login1", "/s/scope", "", "", ""), connection_only=True)
     ws = workspaces.create("Water study", profile="hpc"); ws.env_path, ws.inputs, ws.remote_root, ws.remote_env = info.filepath, ["/gone/opt.scope"], "~/w", "~/w/e.npy"; workspaces.save(ws)
     data = workspaces.export_data(ws, remote.load_profiles()["hpc"])
-    assert data["profile"] == {"name": "hpc", "host": "login1", "scope_bin": "/s/scope", "activate": ""} and json.dumps(data)
+    assert data["profile"] == {"name": "hpc", "host": "login1", "user": "", "port": "", "scope_bin": "/s/scope", "activate": ""} and json.dumps(data)
     same, notes = workspaces.import_data(data, remote.load_profiles())
     assert same.name == "Water study (2)" and same.profile == "hpc" and same.remote_root == "~/w" and same.env_path == info.filepath
     assert any("Water study (2)" in n for n in notes) and any("do not exist on this computer" in n for n in notes)
