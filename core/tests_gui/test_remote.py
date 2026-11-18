@@ -10,7 +10,8 @@ WATER = "3\nwater\nO 0 0 0.117\nH 0 0.757 -0.469\nH 0 -0.757 -0.469\n"
 FAKE_SSH = """#!/bin/bash
 # Fake ssh: skips the options, ignores the host, runs the rest as one shell command (like a remote shell would).
 [ -n "${FAKE_SSH_FAIL:-}" ] && { echo "ssh: connect to host fake port 22: Connection refused" >&2; exit 255; }
-while [ $# -gt 0 ]; do case "$1" in -o) shift 2;; -*) shift;; *) break;; esac; done
+[ -n "${FAKE_SSH_LOG:-}" ] && printf '%s\n' "$*" >> "$FAKE_SSH_LOG"
+while [ $# -gt 0 ]; do case "$1" in -o|-p|-l) shift 2;; -*) shift;; *) break;; esac; done
 shift
 exec bash -c "$*"
 """

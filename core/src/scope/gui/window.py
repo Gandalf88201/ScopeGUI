@@ -691,7 +691,7 @@ class MainWindow(QMainWindow):
         if self.workspace is None: return
         prof = self.remote_tab.profiles.get(self.remote_tab.chooser.currentText()) if self.remote_tab.chooser.currentIndex() >= 0 else None
         root, _ = self.remote_tab.project()
-        self.remote_tab.set_shared(workspaces.sharing(self.workspace.name, prof.host if prof else "", root, self.remote_tab.profiles))
+        self.remote_tab.set_shared(workspaces.sharing(self.workspace.name, prof.host if prof else "", root, self.remote_tab.profiles, prof.user if prof else "", prof.port if prof else ""))
 
     def show_run(self, row) -> None:
         """Shows a run listed on the Runs page in its workspace: a run on this computer on the Run page, a cluster run on the Cluster page (followed)."""

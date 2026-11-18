@@ -6,6 +6,7 @@ does not stop it, and a window opened later can find it again. Nothing contacts 
 seen the list of files.
 """
 import os
+import re
 import time
 from collections.abc import Callable
 from PySide6.QtCore    import QThreadPool, QTimer, Qt, Signal
@@ -29,11 +30,15 @@ class RemoteTab(QWidget):
         self.new_btn, self.delete_btn, self.save_btn = QPushButton("New"), QPushButton("Delete"), QPushButton("Save profile")
         self.name, self.scope_bin, self.activate, self.root, self.env_file = QLineEdit(), QLineEdit(), QLineEdit(), QLineEdit(), QLineEdit()
         self.host = QComboBox(); self.host.setEditable(True); self.host.addItems(remote.list_ssh_hosts()); self.host.setEditText("")
-        self.host.lineEdit().setPlaceholderText("host name or alias from ~/.ssh/config")
+        self.host.lineEdit().setPlaceholderText("login.cluster.org, an alias from ~/.ssh/config, or paste your ssh command (ssh -p 2122 you@login.cluster.org)")
+        self.host.setToolTip("The machine you log in to. You can paste the whole command you use in the Terminal: the user name and the port are moved to their own fields.")
+        self.user, self.port = QLineEdit(), QLineEdit(); self.port.setMaximumWidth(120)
+        self.user.setPlaceholderText("your login name on the cluster  (empty: the one in ~/.ssh/config, or this computer's)")
+        self.port.setPlaceholderText("22"); self.port.setToolTip("SSH port. Leave empty for the usual 22 (or the one in ~/.ssh/config); some clusters use another, for instance 2122.")
         self.scope_bin.setPlaceholderText("~/miniconda3/envs/scope/bin/scope  (or the full /home/you/... path)"); self.activate.setPlaceholderText("optional, only if the path above is empty")
         self.root.setPlaceholderText("~/scope_project  (a folder on the cluster; it need not exist yet)"); self.env_file.setPlaceholderText("/home/you/scope_project/scope_env_cluster.npy")
         form = QFormLayout(); form.setLabelAlignment(Qt.AlignRight)
-        for label, w in (("Profile name", self.name), ("SSH host", self.host), ("Path of scope on the cluster", self.scope_bin), ("…or a line that makes it available", self.activate)): form.addRow(label, w)
+        for label, w in (("Profile name", self.name), ("SSH host", self.host), ("User", self.user), ("Port", self.port), ("Path of scope on the cluster", self.scope_bin), ("…or a line that makes it available", self.activate)): form.addRow(label, w)
         project_title = QLabel("Project on the cluster  (this workspace)"); project_title.setObjectName("sectiontitle")
         form.addRow(project_title)
         for label, w in (("Project folder on the cluster", self.root), ("Cluster environment file", self.env_file)): form.addRow(label, w)
@@ -63,9 +68,9 @@ class RemoteTab(QWidget):
         self.lights_row = QHBoxLayout(); self.lights_title = QLabel("On the cluster:"); self.lights_row.addWidget(self.lights_title)
         self.light_labels = [QLabel() for _ in range(3)]; [self.lights_row.addWidget(l) for l in self.light_labels]; self.lights_row.addStretch(1); self.when = QLabel(); self.when.setObjectName("pagesub"); self.lights_row.addWidget(self.when)
         lay = QVBoxLayout(self); lay.addWidget(head); lay.addLayout(top); lay.addLayout(form); lay.addWidget(self.hint); lay.addLayout(row1); lay.addWidget(self.status); lay.addLayout(self.lights_row); lay.addWidget(split, 1)
-        for edit in (self.name, self.scope_bin, self.activate, self.root, self.env_file): edit.textChanged.connect(self.update_hint)
+        for edit in (self.name, self.user, self.port, self.scope_bin, self.activate, self.root, self.env_file): edit.textChanged.connect(self.update_hint)
         for edit in (self.root, self.env_file): edit.textChanged.connect(self.project_edited)
-        self.host.editTextChanged.connect(self.update_hint)
+        self.host.editTextChanged.connect(self.update_hint); self.host.lineEdit().editingFinished.connect(self.split_host)
         self.new_btn.clicked.connect(self.new_profile); self.delete_btn.clicked.connect(self.delete_profile); self.save_btn.clicked.connect(self.save_profile); self.chooser.currentTextChanged.connect(self.choose)
         self.terminal_btn.clicked.connect(self.show_terminal_command); self.test_btn.clicked.connect(self.test_connection)
         self.pre_up.clicked.connect(lambda: self.upload(preview=True)); self.up.clicked.connect(lambda: self.upload(preview=False)); self.run_btn.clicked.connect(self.run_remote)
@@ -84,8 +89,20 @@ class RemoteTab(QWidget):
         """Shows the connection of a saved profile. The project fields are not touched: they belong to the workspace."""
         p = self.profiles.get(name, remote.Profile())
         self.lights, self.checked_at = remote.unchecked_lights(), ""; self.render_lights()
-        self.name.setText(p.name); self.host.setEditText(p.host); self.scope_bin.setText(p.scope_bin); self.activate.setText(p.activate)
+        self.name.setText(p.name); self.host.setEditText(p.host); self.user.setText(p.user); self.port.setText(p.port); self.scope_bin.setText(p.scope_bin); self.activate.setText(p.activate)
         if not self.loading_project: self.projectChanged.emit()
+
+    def split_host(self) -> None:
+        """When the host field holds more than a host (`you@host`, `host:2122`, or a pasted `ssh -p 2122 you@host`), moves the user name and the
+        port to their own fields. A user or port already typed is replaced only by one written in the pasted text."""
+        text = self.host.currentText().strip()
+        if not text or not (re.search(r"[\s@]", text) or text.startswith("ssh://") or re.search(r":\d+$", text)): return
+        found = remote.parse_ssh_target(text)
+        if not found: return
+        self.host.setEditText(found["host"])
+        if found["user"]: self.user.setText(found["user"])
+        if found["port"]: self.port.setText(found["port"])
+        if not self.name.text().strip(): self.name.setText(re.sub(r"[^A-Za-z0-9_.-]", "_", found["host"].split(".")[0]))
 
     def select_profile(self, name: str) -> None:
         """Selects a saved connection by name (or none)."""
@@ -117,8 +134,7 @@ class RemoteTab(QWidget):
     def update_hint(self) -> None:
         """Tells, while the user types, what is still missing or wrong in the profile (the same checks Save and Test use)."""
         p = self.current(); problems = remote.field_problems(p)
-        labels = {"name": "Profile name", "host": "SSH host", "scope_bin": "Path of scope", "root": "Project folder", "env": "Environment file"}
-        if problems: self.hint.setText("To complete the profile and the project:\n" + "\n".join(f"  • {labels[k]}: {v}" for k, v in problems.items())); set_kind(self.hint, "warn")
+        if problems: self.hint.setText("To complete the profile and the project:\n" + "\n".join(f"  • {remote.FIELD_LABELS[k]}: {v}" for k, v in problems.items())); set_kind(self.hint, "warn")
         else: self.hint.setText("✓ The connection and the project are complete. Save the profile, then Test connection."); set_kind(self.hint, "ok")
         if self.shared:
             self.hint.setText(self.hint.text() + f"\n⚠ The same project folder on this cluster is used by workspace(s): {', '.join(self.shared)}. Do not run the same system from both: the cluster refuses a second run of a system that is running, but results registered in one workspace are not seen by the other until you download them.")
@@ -127,12 +143,13 @@ class RemoteTab(QWidget):
         self.env_file.setPlaceholderText((root.rstrip("/") + "/scope_env_<name>.npy") if root else "~/scope_project/scope_env_cluster.npy")
 
     def current(self) -> "remote.Profile":
-        return remote.Profile(self.name.text().strip(), self.host.currentText().strip(), self.scope_bin.text().strip(), self.activate.text().strip(), self.root.text().strip(), self.env_file.text().strip())
+        return remote.Profile(self.name.text().strip(), self.host.currentText().strip(), self.scope_bin.text().strip(), self.activate.text().strip(), self.root.text().strip(), self.env_file.text().strip(),
+                              user=self.user.text().strip(), port=self.port.text().strip())
 
     def save_profile(self) -> bool:
-        """Saves the connection (name, host, how to start scope). The project fields are saved with the workspace, not in the profile."""
-        p = self.current(); labels = {"name": "Profile name", "host": "SSH host", "scope_bin": "Path of scope"}
-        problems = [f"{labels[k]}: {v}" for k, v in remote.connection_problems(p).items()]
+        """Saves the connection (name, host, user, port, how to start scope). The project fields are saved with the workspace, not in the profile."""
+        self.split_host(); p = self.current()
+        problems = [f"{remote.FIELD_LABELS[k]}: {v}" for k, v in remote.connection_problems(p).items()]
         if problems: QMessageBox.warning(self, "Profile not saved", "\n".join(problems)); return False
         remote.save_profile(p, connection_only=True); self.profiles = remote.load_profiles()
         self.loading_project = True; self.reload_chooser(p.name); self.loading_project = False; self.projectChanged.emit()
@@ -144,7 +161,7 @@ class RemoteTab(QWidget):
             remote.delete_profile(name); self.profiles = remote.load_profiles(); self.reload_chooser()
 
     def valid_profile(self) -> "remote.Profile | None":
-        p = self.current(); problems = remote.validate_profile(p)
+        self.split_host(); p = self.current(); problems = remote.validate_profile(p)
         if problems: QMessageBox.warning(self, "Check the profile", "\n".join(problems)); return None
         return p
 
@@ -173,7 +190,7 @@ class RemoteTab(QWidget):
         p = self.valid_profile()
         if not p: return
         import scope
-        self.table.setRowCount(0); self.log.appendPlainText(f"$ ssh {p.host}  (connection test, read-only)")
+        self.table.setRowCount(0); self.log.appendPlainText(f"$ {remote.ssh_display(p)}  (connection test, read-only)")
         self.lights = remote.unchecked_lights("Checking…"); self.checked_at = ""; self.render_lights()
         def work():
             result = remote.run_script(p, remote.probe_script(p), timeout=90)
@@ -241,14 +258,14 @@ class RemoteTab(QWidget):
         items = remote.upload_items(p, info, system, inputs)
         def work():
             made = remote.run_script(p, remote.remote_dirs_script(p, system))
-            return (made, remote.sync(items, dry_run=True)) if made.ok else (made, [])
+            return (made, remote.sync(items, dry_run=True, p=p)) if made.ok else (made, [])
         def done(result):
             made, dry = result
             if not made.ok: self.log.appendPlainText("Cannot prepare the folders on the cluster: " + (made.stderr.strip() or f"exit code {made.returncode}")); self.status.setText("Upload not possible."); return
             n = self.show_sync(dry, "Would copy"); self.status.setText(f"Preview: {n} change(s). Nothing was copied.")
             if preview or n == 0: return
             if QMessageBox.question(self, "Upload", f"Copy {n} change(s) to {p.host}:{p.remote_root}?\n\nSystem '{system}' and {len(inputs)} input file(s). Existing files with the same name are replaced; nothing is deleted.") != QMessageBox.Yes: return
-            self.background(lambda: remote.sync(items, dry_run=False), lambda r: (self.show_sync(r, "Copied"), self.status.setText("Upload finished.")), "Uploading…")
+            self.background(lambda: remote.sync(items, dry_run=False, p=p), lambda r: (self.show_sync(r, "Copied"), self.status.setText("Upload finished.")), "Uploading…")
         self.background(work, done, "Checking what would be copied…")
 
     def open_download(self) -> "object | None":
@@ -275,7 +292,7 @@ class RemoteTab(QWidget):
         if missing: note += "\n\nWARNING from the last connection test:\n" + "\n".join(missing)
         if QMessageBox.question(self, "Run on the cluster", f"Start `scope run` for '{system}' on {p.host}, with the files uploaded in {p.remote_root}/inputs.\n\nThe run is detached: it keeps going on the cluster if you close this window or lose the connection.{note}") != QMessageBox.Yes: return
         script = remote.detached_run_script(p, system, [f"{p.remote_root.rstrip('/')}/inputs/{os.path.basename(r.path)}" for r in valid])
-        self.log.appendPlainText(f"\n$ ssh {p.host}  (start `scope set_path` and `scope run` for {system}, detached)\n")
+        self.log.appendPlainText(f"\n$ {remote.ssh_display(p)}  (start `scope set_path` and `scope run` for {system}, detached)\n")
         self.background(lambda: remote.run_script(p, script, timeout=60), lambda res: self.started(p, system, res), f"Starting the run on {p.host}…")
 
     def started(self, p: "remote.Profile", system: str, res: "remote.Result") -> None:

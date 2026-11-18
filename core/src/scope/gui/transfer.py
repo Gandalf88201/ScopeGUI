@@ -124,12 +124,12 @@ def list_file(system: str, rels: list) -> str:
 def files_argv(p: "remote.Profile", info: "backend.EnvInfo", system: str, list_path: str, dry_run: bool=False) -> list:
     """rsync arguments that copy the names in `list_path` from <project>/Computations/<system>/ into the local <Computations>/<system>/."""
     src = f"{p.host}:{p.remote_root.rstrip('/')}/Computations/{system}/"; dst = os.path.join(info.computations_path, system) + "/"
-    return [remote.rsync_exe(), "-a", "-z", "-i", "--partial", *(["-n"] if dry_run else []), f"--files-from={list_path}", "-e", remote.ssh_command_string(), src, dst]
+    return [remote.rsync_exe(), "-a", "-z", "-i", "--partial", *(["-n"] if dry_run else []), f"--files-from={list_path}", "-e", remote.ssh_command_string(p), src, dst]
 
 def system_argv(p: "remote.Profile", info: "backend.EnvInfo", system: str) -> list:
     """rsync arguments that copy the cluster's system file next to the local one, as <system>.npy.incoming (it replaces the local file only once complete)."""
     src = f"{p.host}:{p.remote_root.rstrip('/')}/Systems/{system}/{system}.npy"
-    return [remote.rsync_exe(), "-a", "-z", "--partial", "-e", remote.ssh_command_string(), src, incoming_path(info, system)]
+    return [remote.rsync_exe(), "-a", "-z", "--partial", "-e", remote.ssh_command_string(p), src, incoming_path(info, system)]
 
 def incoming_path(info: "backend.EnvInfo", system: str) -> str:
     return os.path.join(info.systems_path, system, f"{system}.npy.incoming")

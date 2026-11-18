@@ -142,16 +142,16 @@ def suggested_remote_root(ws: Workspace) -> str:
     """A project folder to propose on the cluster for a new workspace."""
     return "~/scope_projects/" + file_name(ws.name)[:-5]
 
-def sharing(name: str, host: str, root: str, profiles: dict) -> list:
-    """Other workspaces whose project on the cluster is the same folder of the same host (the same system run from two of them would collide)."""
+def sharing(name: str, host: str, root: str, profiles: dict, user: str="", port: str="") -> list:
+    """Other workspaces whose project on the cluster is the same folder of the same account (host, user, port): the same system run from two of them would collide."""
     if not host or not root: return []
-    target = (host, root.rstrip("/")); out = []
+    target = ((host, user, port), root.rstrip("/")); out = []
     for other in list_names():
         if other == name: continue
         ws = load(other); prof = profiles.get(ws.profile) if ws else None
         if ws is None or prof is None: continue
         other_root, _ = remote_fields(ws, prof)
-        if (prof.host, other_root.rstrip("/")) == target: out.append(other)
+        if ((prof.host, prof.user, prof.port), other_root.rstrip("/")) == target: out.append(other)
     return out
 
 EXPORT_FORMAT = "scope-gui-workspace"
@@ -160,7 +160,7 @@ def export_data(ws: Workspace, profile: "object | None") -> dict:
     """What an exported workspace file holds: the workspace, and the connection of its profile (host and how to start scope; never a password, there is none to store)."""
     data = {"format": EXPORT_FORMAT, "version": 1, "workspace": asdict(ws)}
     data["workspace"]["legacy"] = False
-    if profile is not None: data["profile"] = {k: getattr(profile, k) for k in ("name", "host", "scope_bin", "activate")}
+    if profile is not None: data["profile"] = {k: getattr(profile, k, "") for k in ("name", "host", "user", "port", "scope_bin", "activate")}
     return data
 
 def import_data(data: dict, profiles: dict) -> tuple:
@@ -175,9 +175,10 @@ def import_data(data: dict, profiles: dict) -> tuple:
     if ws.name != base: notes.append(f"A workspace called '{base}' exists: the imported one is '{ws.name}'.")
     conn = data.get("profile")
     if conn:
-        incoming = remote.Profile(conn.get("name", ""), conn.get("host", ""), conn.get("scope_bin", ""), conn.get("activate", ""))
+        incoming = remote.Profile(conn.get("name", ""), conn.get("host", ""), conn.get("scope_bin", ""), conn.get("activate", ""), user=str(conn.get("user", "")), port=str(conn.get("port", "")))
         existing = profiles.get(incoming.name)
-        if existing is None or (existing.host, existing.scope_bin, existing.activate) != (incoming.host, incoming.scope_bin, incoming.activate):
+        same = lambda a, b: (remote.connection_key(a), a.scope_bin, a.activate) == (remote.connection_key(b), b.scope_bin, b.activate)
+        if existing is None or not same(existing, incoming):
             if existing is not None:
                 k = 2
                 while f"{incoming.name}_{k}" in profiles: k += 1

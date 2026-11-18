@@ -50,15 +50,16 @@ def cluster_projects(spaces: list, profiles: dict) -> dict:
         if prof is None: continue
         root, env = workspaces.remote_fields(ws, prof)
         if not root: continue
-        p = remote.Profile(prof.name, prof.host, prof.scope_bin, prof.activate, root, env)
-        key = (prof.host, root.rstrip("/"))
+        p = remote.Profile(prof.name, prof.host, prof.scope_bin, prof.activate, root, env, user=prof.user, port=prof.port)
+        key = (remote.connection_key(prof), root.rstrip("/"))
         out.setdefault(key, (p, []))[1].append(ws.name)
     return out
 
 def check_clusters(projects: dict) -> tuple:
     """Asks each cluster project which runs are active (read-only). Returns (rows, messages)."""
     rows, messages = [], []
-    for (host, root), (p, names) in projects.items():
+    for (_, root), (p, names) in projects.items():
+        host = p.host
         res = remote.run_script(p, remote.list_runs_script(p), timeout=30)
         if not res.ok: messages.append(f"{host}:{root}: not reachable ({(res.stderr.strip().splitlines() or [f'exit code {res.returncode}'])[-1]})"); continue
         found = remote.parse_runs(res.stdout)

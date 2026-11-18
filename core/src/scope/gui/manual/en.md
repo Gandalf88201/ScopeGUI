@@ -291,17 +291,21 @@ Press **New** (or start typing, the first time), fill in the connection and pres
 | Field | Part | What to write | Example |
 |---|---|---|---|
 | Profile name | Profile | Any label: letters, digits, `_`, `-`, no spaces | `nersc` |
-| SSH host | Profile | The name you use with `ssh`. The list shows the names found in your `~/.ssh/config`. | `nersc` |
+| SSH host | Profile | The machine you log in to, or an alias from your `~/.ssh/config` (the list shows them). You can also paste the whole command you use in the Terminal: when you leave the field, the user name and the port move to their own fields. | `login.cluster.org` |
+| User | Profile | Your login name on the cluster. Leave empty if `~/.ssh/config` already gives it, or if it is the same as on this computer. | `jsmith` |
+| Port | Profile | The SSH port. Leave empty for the usual 22 (or the one in `~/.ssh/config`). Some clusters use another one. | `2122` |
 | Path of scope on the cluster | Profile | Where the `scope` program is. Prefer this field. | `~/miniconda3/envs/scope/bin/scope` |
 | Line that makes scope available | Profile | Only if the path field is empty, for example `module load scope`. `conda activate` often does not work in this kind of shell, which is why the path is preferred. | |
 | Project folder on the cluster | Workspace | The folder that holds `Sources`, `Systems` and `Computations` | `~/scope_projects/water` |
 | Cluster environment file | Workspace | The `scope_env_*.npy` made by `scope config` | `~/scope_projects/water/scope_env_cluster.npy` |
 
+> **Example.** If you log in with `ssh -p 2122 jsmith@login.cluster.org`, paste exactly that into **SSH host**: it becomes host `login.cluster.org`, user `jsmith`, port `2122`. `jsmith@login.cluster.org:2122` works too. Every command this window runs, and every file it copies, then uses that port and that user.
+
 > **Tip.** To find the values, log in and run `which scope` (the path of `scope`) and `pwd` inside the project folder. Paths start with `/` or `~/`, with no spaces and no `$VARIABLES`.
 
 ### Password or second factor
 
-This window cannot answer a password or code prompt. Press **Show terminal command**, copy the command, run it once in the Terminal app and log in. It opens a connection that stays open for a few hours, and this window reuses it. Keys without a password need no such step.
+This window cannot answer a password or code prompt. Press **Show terminal command**, copy the command (it already contains the port and the user of the profile), run it once in the Terminal app and log in. It opens a connection that stays open for a few hours, and this window reuses it. Keys without a password need no such step.
 
 ### Test connection
 

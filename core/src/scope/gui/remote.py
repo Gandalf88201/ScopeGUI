@@ -36,6 +36,8 @@ class Profile:
         remote_root (str):  Absolute project folder on the cluster. Its Sources, Systems and Computations subfolders must
                             be the folders of the cluster environment.
         remote_env (str):   Absolute path of the cluster environment file (scope_env_<name>.npy).
+        user (str):         Optional login name on the cluster (ssh -l). Empty: the one from ~/.ssh/config, else the local user name.
+        port (str):         Optional SSH port (ssh -p), digits only. Empty: the one from ~/.ssh/config, else 22.
     """
     name:        str = ""
     host:        str = ""
@@ -43,6 +45,45 @@ class Profile:
     activate:    str = ""
     remote_root: str = ""
     remote_env:  str = ""
+    user:        str = ""
+    port:        str = ""
+
+SAFE_USER = re.compile(r"^[A-Za-z0-9_.][A-Za-z0-9_.-]*$")
+## ssh options that take a value, so that the value is not taken for the host when an ssh command is pasted
+SSH_VALUE_OPTIONS = set("BbcDEeFIiJLlmOoPpQRSWw")
+
+def parse_ssh_target(text: str) -> "dict | None":
+    """Splits what a user may paste in the host field into host, user and port. Accepts a plain host, `user@host`, `user@host:port`,
+    `ssh://user@host:port`, or a whole command such as `ssh -p 2122 user@host` or `ssh -l user host -p 2122`. Returns
+    {"host", "user", "port"} (user and port may be empty), or None when no host is found. Contacts nothing."""
+    try: words = shlex.split(text.strip())
+    except ValueError: return None
+    if words and os.path.basename(words[0]) == "ssh": words = words[1:]
+    user = port = target = ""; i = 0
+    while i < len(words):
+        w = words[i]
+        if w.startswith("-") and len(w) > 1:
+            flag, rest = w[1], w[2:]
+            value = rest if rest else (words[i + 1] if flag in SSH_VALUE_OPTIONS and i + 1 < len(words) else "")
+            if flag == "p": port = value
+            elif flag == "l": user = value
+            elif flag == "o" and "=" in value:
+                key, val = value.split("=", 1)
+                if key.lower() == "port": port = val
+                elif key.lower() == "user": user = val
+            i += 1 if rest or flag not in SSH_VALUE_OPTIONS else 2; continue
+        if not target: target = w
+        i += 1
+    if target.startswith("ssh://"): target = target[len("ssh://"):].rstrip("/")
+    if "@" in target: found, target = target.rsplit("@", 1); user = user or found
+    m = re.match(r"^(.+):(\d+)$", target)
+    if m: target, port = m.group(1), port or m.group(2)
+    if not target: return None
+    return {"host": target, "user": user, "port": port}
+
+def connection_key(p: Profile) -> tuple:
+    """What identifies one cluster account: two profiles with the same key reach the same files."""
+    return (p.host, p.user, p.port)
 
 def is_remote_path(path: str) -> bool:
     """True for an absolute path (/home/u/x) or one under the cluster home (~/x). Spaces are not accepted, and neither are variables such as $HOME."""
@@ -64,7 +105,10 @@ def connection_problems(p: Profile) -> dict:
     out = {}
     if not backend.SAFE_NAME.match(p.name or ""): out["name"] = "Letters, digits, '_', '-' or '.', no spaces."
     if not p.host: out["host"] = "The SSH host or alias is empty."
-    elif p.host.startswith("-") or re.search(r"\s", p.host): out["host"] = "A host name has no spaces and does not start with '-'."
+    elif p.host.startswith("-") or re.search(r"\s", p.host): out["host"] = "A host name has no spaces and does not start with '-'. To paste a whole ssh command, leave the field and it is split."
+    elif "@" in p.host or re.search(r":\d+$", p.host): out["host"] = "Put the user name and the port in their own fields (leave the field and it is split)."
+    if p.user and not SAFE_USER.match(p.user): out["user"] = "A user name has letters, digits, '_', '-' or '.', no spaces, and does not start with '-'."
+    if p.port and not (p.port.isdigit() and 1 <= int(p.port) <= 65535): out["port"] = "The port is a number between 1 and 65535 (22 if the cluster says nothing)."
     if not p.scope_bin and not p.activate: out["scope_bin"] = "Give the full path of `scope` on the cluster (or a line in the next box)."
     elif p.scope_bin and not is_remote_path(p.scope_bin): out["scope_bin"] = "Write the full path starting with / or ~/ , with no spaces and no $VARIABLES."
     return out
@@ -84,8 +128,9 @@ def field_problems(p: Profile) -> dict:
 
 def validate_profile(p: Profile) -> list:
     """Returns a list of problems with the profile (empty if it can be used)."""
-    labels = {"name": "Profile name", "host": "SSH host", "scope_bin": "Path of scope", "root": "Project folder", "env": "Environment file"}
-    return [f"{labels[k]}: {v}" for k, v in field_problems(p).items()]
+    return [f"{FIELD_LABELS[k]}: {v}" for k, v in field_problems(p).items()]
+
+FIELD_LABELS = {"name": "Profile name", "host": "SSH host", "user": "User", "port": "Port", "scope_bin": "Path of scope", "root": "Project folder", "env": "Environment file"}
 
 def load_profiles() -> dict:
     """Reads the saved profiles (name -> Profile) from the GUI preferences."""
@@ -135,21 +180,31 @@ def control_path() -> str:
     base = os.path.expanduser("~/.ssh")
     return os.path.join(base, "cm-%C") if os.path.isdir(base) else f"/tmp/scope-gui-{os.getuid()}-%C"
 
-def ssh_options() -> list:
-    """Options for every command the GUI runs: never ask anything, give up quickly, reuse a shared connection if one is open."""
-    return ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-o", "ServerAliveInterval=30", "-o", "ControlMaster=auto", "-o", f"ControlPath={control_path()}", "-o", "ControlPersist=10m"]
+def account_options(p: "Profile | None") -> list:
+    """-p PORT and -l USER when the profile sets them (otherwise ~/.ssh/config or ssh's defaults apply)."""
+    if p is None: return []
+    return (["-p", p.port] if p.port else []) + (["-l", p.user] if p.user else [])
 
-def ssh_command_string() -> str:
+def ssh_options(p: "Profile | None"=None) -> list:
+    """Options for every command the GUI runs: never ask anything, give up quickly, reuse a shared connection if one is open; then the profile's port and user."""
+    return ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-o", "ServerAliveInterval=30", "-o", "ControlMaster=auto", "-o", f"ControlPath={control_path()}", "-o", "ControlPersist=10m", *account_options(p)]
+
+def ssh_command_string(p: "Profile | None"=None) -> str:
     """The ssh command with its options as one string, for rsync's -e."""
-    return " ".join([shlex.quote(ssh_exe()), *[shlex.quote(o) for o in ssh_options()]])
+    return " ".join([shlex.quote(ssh_exe()), *[shlex.quote(o) for o in ssh_options(p)]])
+
+def ssh_display(p: Profile) -> str:
+    """The plain ssh command a user would type for this profile, for logs (`ssh -p 2122 -l me host`)."""
+    return " ".join(["ssh", *[shlex.quote(o) for o in account_options(p)], shlex.quote(p.host)])
 
 def master_command(p: Profile) -> str:
-    """The command to type once in a terminal when the cluster needs a password or a second factor: it opens a connection the GUI then reuses."""
-    return f"ssh -M -N -f -o ControlPath={control_path()} -o ControlPersist=4h {shlex.quote(p.host)}"
+    """The command to type once in a terminal when the cluster needs a password or a second factor: it opens a connection the GUI then reuses.
+    It carries the same port and user as the GUI's commands, so both name the same socket (%C hashes host, port and user)."""
+    return " ".join(["ssh -M -N -f", f"-o ControlPath={control_path()}", "-o ControlPersist=4h", *[shlex.quote(o) for o in account_options(p)], shlex.quote(p.host)])
 
 def ssh_argv(p: Profile, remote_command: str="bash -l -s") -> list:
     """Arguments to start a remote login shell that reads its script from standard input."""
-    return [ssh_exe(), *ssh_options(), p.host, remote_command]
+    return [ssh_exe(), *ssh_options(p), p.host, remote_command]
 
 @dataclass
 class Result:
@@ -353,11 +408,11 @@ def evaluate_probe(p: Profile, result: Result, local_version: str="", local_comm
 ############
 ### Sync ###
 ############
-def rsync_argv(src: str, dst: str, dry_run: bool=False, excludes: list=None) -> list:
-    """rsync arguments: archive, compress, itemize changes, never delete. Uses only flags that old (openrsync) versions also know."""
+def rsync_argv(src: str, dst: str, dry_run: bool=False, excludes: list=None, p: "Profile | None"=None) -> list:
+    """rsync arguments: archive, compress, itemize changes, never delete. Uses only flags that old (openrsync) versions also know. The profile gives the port and user."""
     argv = [rsync_exe(), "-a", "-z", "-i"] + (["-n"] if dry_run else [])
     argv += [f"--exclude={e}" for e in (DEFAULT_EXCLUDES if excludes is None else excludes)]
-    return argv + ["-e", ssh_command_string(), src, dst]
+    return argv + ["-e", ssh_command_string(p), src, dst]
 
 def upload_items(p: Profile, info: "backend.EnvInfo", system: str, inputs: list) -> list:
     """What an upload copies, as (local, remote, kind) triples. Generated calculation files are never part of it: SCOPE writes them on the cluster."""
@@ -380,12 +435,12 @@ def remote_dirs_script(p: Profile, system: str) -> str:
     root = shell_path(p.remote_root.rstrip("/")); s = shlex.quote(system)
     return f"mkdir -p {root}/Sources/{s} {root}/Systems/{s} {root}/Computations/{s} {root}/inputs\n"
 
-def sync(items: list, dry_run: bool) -> list:
-    """Runs rsync for each item. Returns a list of (kind, Result, lines) where lines are the itemized changes."""
+def sync(items: list, dry_run: bool, p: "Profile | None"=None) -> list:
+    """Runs rsync for each item, through the profile's port and user. Returns a list of (kind, Result, lines) where lines are the itemized changes."""
     out = []
     for src, dst, kind in items:
         try:
-            done = subprocess.run(rsync_argv(src, dst, dry_run), capture_output=True, text=True, timeout=600)
+            done = subprocess.run(rsync_argv(src, dst, dry_run, p=p), capture_output=True, text=True, timeout=600)
             res = Result(done.returncode, done.stdout, done.stderr)
         except subprocess.TimeoutExpired: res = Result(-2, "", "Timed out")
         except OSError as exc: res = Result(-1, "", str(exc))
