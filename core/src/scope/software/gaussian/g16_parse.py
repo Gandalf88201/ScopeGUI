@@ -28,7 +28,7 @@ def parse_scf_status(lines):
     linenum2, found2 = search_string("Convergence criterion not met",      lines, typ="last")
     if found1 and not found2:             return True
     elif found2:                          
-        if linenum1 > linenum2:           return True ## Case of Quadratic Convergence
+        if found1 and linenum1 > linenum2: return True ## Case of Quadratic Convergence
         else:                             return False
     else:                                 return None
 

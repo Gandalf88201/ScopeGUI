@@ -286,8 +286,12 @@ def gen_qe_subfile(comp: object, queue: object, module: str, procs: int=1, exe: 
     Scheduler stdout/stderr use absolute paths in the computation folder.
     Removes the computation's scratch directory after output and wf copying;
     retains it and reports its path if either copy fails.
+    SLURM requests an advance warning 10-60 seconds before the time limit.
+    USR1/TERM/INT stop the calculation before returning partial results; these
+    interruptions exit with code 124 after copying. SIGKILL cannot be handled.
     """
     import shlex
+    from scope.utils.core_tools import gen_run_block, get_slurm_signal_time
     wf_prepare, wf_store = gen_qe_wf_blocks(comp, debug=debug)
     stderr_path = shlex.quote(os.path.abspath(os.path.join(comp.path, comp.name+'.stderr')))
     stdout_path = shlex.quote(os.path.abspath(os.path.join(comp.path, comp.name+'.stdout')))
@@ -319,6 +323,7 @@ def gen_qe_subfile(comp: object, queue: object, module: str, procs: int=1, exe: 
             time_limit = getattr(queue._environment,'time_limit',None) # If the user supplies a time limit, it is stored in the environment
             if time_limit is None: time_limit = queue.time_limit       # If not, then it uses the default time limit of the queue.
             print(f"#SBATCH --time={time_limit}", file=sub)
+            print(f"#SBATCH --signal=B:USR1@{get_slurm_signal_time(time_limit)}", file=sub)
 
         elif queue._environment.scheduler == 'sge':
             print(f"#!/bin/bash", file=sub)
@@ -348,8 +353,9 @@ def gen_qe_subfile(comp: object, queue: object, module: str, procs: int=1, exe: 
         # 3) Run QE. Saved data will be copied even if QE does not converge.
         print('', file=sub)
         print('# Run QE', file=sub)
-        if queue._environment.scheduler == 'slurm' and procs >= 128: print(f"{launch_command} < {comp.inp_name} > {comp.out_name} -pd .true.", file=sub)
-        else:                                                        print(f"{launch_command} < {comp.inp_name} > {comp.out_name}", file=sub)
+        if queue._environment.scheduler == 'slurm' and procs >= 128: launch_command += ' -pd .true.'
+        run_command = f'{launch_command} < {shlex.quote(comp.inp_name)} > {shlex.quote(comp.out_name)}'
+        print(gen_run_block(run_command), file=sub)
 
         # 4) Preserve the wf. Stop only this copy block on failure, then return the output.
         if wf_store: print(wf_store, file=sub)
@@ -376,6 +382,7 @@ else
     echo "SCOPE: Scratch cleanup failed: $SCRATCHDIR" >&2
     exit 1
 fi''', file=sub)
+        print('\nexit "$run_status"', file=sub)
 
         os.chmod(comp.sub_path, 0o777)
 

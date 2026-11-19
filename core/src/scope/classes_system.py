@@ -186,6 +186,10 @@ class System(object):
 
     ######
     def set_main_path(self, path: str, create_folders: bool=True, debug: int=0) -> None:
+        """Sets root paths and propagates them through the workflow hierarchy.
+
+        create_folders=False updates paths without creating directories.
+        """
         if path[-1] != '/': path += '/'
         self.sources_path      = f"{path}Sources/{self.name}/"
         self.system_path       = f"{path}Systems/{self.name}/"
@@ -200,21 +204,21 @@ class System(object):
             print(f"System path:        {self.system_path}")
             print(f"System file:        {self.system_file}")
             print(f"Computations path:  {self.computations_path}")
-        self.set_paths_down_hierarchy(debug=debug)
+        self.set_paths_down_hierarchy(create_folders=create_folders, debug=debug)
         return True
 
     def set_paths(self, create_folders: bool=True, debug: int=0) -> None: 
-        from scope.read_write import configure_path_completion
         """
-        Interactively set the paths associated with this system.
+        Interactively sets paths and propagates them through the workflow hierarchy.
 
         Parameters:
-            create_folders (bool):       Whether to create missing folders.
+            create_folders (bool):       Whether to create missing folders at any hierarchy level.
             debug (int):                 Verbosity level.
 
         Returns:
             None
         """
+        from scope.read_write import configure_path_completion
         # Set up autocomplete
         configure_path_completion()
 
@@ -238,7 +242,7 @@ class System(object):
             print(f"System path: {self.system_path}")
             print(f"System file: {self.system_file}")
         ## Chance all paths
-        self.set_paths_down_hierarchy(debug=debug)
+        self.set_paths_down_hierarchy(create_folders=create_folders, debug=debug)
 
     ######
     def set_paths_from_environment(self, environment: object, create_folders: bool=True, debug: int=0) -> None: 
@@ -247,7 +251,7 @@ class System(object):
 
         Parameters:
             environment (object):        Environment that provides global paths.
-            create_folders (bool):       Whether to create missing folders.
+            create_folders (bool):       Whether to create missing folders at any hierarchy level.
             debug (int):                 Verbosity level.
 
         Returns:
@@ -278,8 +282,6 @@ class System(object):
         if not os.path.isdir(self.system_path)       and create_folders: os.makedirs(self.system_path)
         if not os.path.isdir(self.computations_path) and create_folders: os.makedirs(self.computations_path)
         if not os.path.isdir(self.sources_path)      and create_folders: os.makedirs(self.sources_path)
-        if not create_folders and (not os.path.isdir(self.system_path) or not os.path.isdir(self.computations_path) or not os.path.isdir(self.sources_path)):
-            print(f"SYSTEM.SET_PATHS_FROM_ENV: New Folders Could not be created. Please Use create_folders=True")
 
         if debug > 0: 
             print(f"SYSTEM.SET_PATHS_FROM_ENV: new paths:")
@@ -287,7 +289,7 @@ class System(object):
             print(f"System path:        {self.system_path}")
             print(f"System file:        {self.system_file}")
             print(f"Computations path:  {self.computations_path}")
-        self.set_paths_down_hierarchy(debug=debug)
+        self.set_paths_down_hierarchy(create_folders=create_folders, debug=debug)
         return True
 
     ######

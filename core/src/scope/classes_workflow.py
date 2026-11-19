@@ -134,11 +134,16 @@ class Branch(object):
         return self.status
     
     def read_status(self):
+        """Reads branch status markers, with termination taking precedence.
+
+        Updates and returns self.status; absent markers mean 'active'.
+        """
         # There is an alternative to this function that does not require loading the system and branch. 
         # It is in Utils/Run_Job.py as get_status()
         system_path = self._system.system_path
-        if   os.path.isfile(f"{system_path}{self.name}_TERMINATED"):     self.status == "terminated"
-        elif os.path.isfile(f"{system_path}{self.name}_FINISHED"):       self.status == "finished"
+        if   os.path.isfile(f"{system_path}{self.name}_TERMINATED"):     self.status = "terminated"
+        elif os.path.isfile(f"{system_path}{self.name}_FINISHED"):       self.status = "finished"
+        else:                                                         self.status = "active"
         return self.status
 
     def clear_status(self):
@@ -472,15 +477,24 @@ class Job(object):
         return False
 
     def update_job_data(self, old_job_data, new_job_data, debug: int=0):
+        """Applies incoming Job settings and retains old settings absent from them.
+
+        Incoming settings include input defaults. Updates the Job attributes
+        that mirror job_data and marks changed settings for saving.
+        """
         self.job_data         = new_job_data
         self.job_data        += old_job_data
         ## This is done to mimic the __init of a job class
         self.name             = new_job_data.job.lower()
         self.type             = new_job_data.job_type.lower()
+        self.istate           = new_job_data.istate
+        self.fstate           = new_job_data.fstate
+        self.hierarchy        = int(new_job_data.hierarchy)
         self.requisites       = new_job_data.requisites
         self.constrains       = new_job_data.constrains
         self.job_setup        = new_job_data.job_setup.lower()
         self.must_be_good     = new_job_data.must_be_good                
+        if self.job_data != old_job_data: self._workflow._branch._system.should_save = True
         self.check_requisites()
 
     def get_max_step(self, debug: int=0):
@@ -1019,6 +1033,7 @@ class Computation(object):
         type (str):                     Computation type.
         step (int):                     Step number in the job setup.
         run_number (int):               Retry or update counter.
+        origin (str | None):            Creation reason, such as 'g16_ts_recovery_standard'; None for ordinary Computations.
         wf_path (str | None):           Planned wf location when job_data.save_wf is enabled, otherwise None.
         energy (float | None):          Created by energy registration, in Hartree.
         forces (list | None):           Created by optimization registration, in the parser's units.
@@ -1046,6 +1061,7 @@ class Computation(object):
         self.isregistered     = False
         self.has_update       = False
         self.is_update        = is_update
+        self.origin           = None
         self.run_number       = self.set_run_number() 
         self.states           = []
         self.source           = _job.source      ## Just to simplify calling this variable 
@@ -1191,21 +1207,35 @@ class Computation(object):
         return False
 
     def update_qc_data(self, old_qc_data, new_qc_data, debug: int=0):
+        """Applies incoming QC settings while retaining generated computation settings.
+
+        Incoming values, including defaults, take precedence; old settings
+        fill missing names. State names assigned by the Job setup or a
+        continuation remain fixed, as do finite-difference force requests.
+        Recovery runs retain their QE mixing/iteration settings or
+        Gaussian force-constant method. Changed settings mark the System for
+        saving. Returns the effective qc_data.
+        """
         ## Updates qc_data
         self.qc_data          = new_qc_data
         self.software         = new_qc_data.software
-        ## Adds any old information that is now not present. I'm not sure about this one
+        ## Retains old settings only when absent from the incoming data.
         self.qc_data         += old_qc_data
-        # Displacement States and force requests belong to the generated set of displaced computations.
+        # Job setup and continuation creation assign each computation's States.
+        for setting in ['istate','fstate']:
+            if hasattr(old_qc_data,setting): self.qc_data._mod_attr(setting,getattr(old_qc_data,setting))
+        # Finite-difference computations always request forces from an SCF.
         if self._job.job_setup == 'findiff':
-            for setting in ['istate','fstate','print_forces']:
-                self.qc_data._mod_attr(setting, getattr(old_qc_data,setting))
+            self.qc_data._mod_attr('print_forces',old_qc_data.print_forces)
             self.qc_data._mod_attr('comp_type', 'scf')
         self.type             = self.qc_data.comp_type
         ## Exceptions
         if self.is_update and self.software == 'qe':
             for setting in ["mix_beta", "mix_mode", "mix_ndim", "elec_maxstep"]:
                 if hasattr(old_qc_data,setting): self.qc_data._mod_attr(setting,getattr(old_qc_data,setting))
+        elif self.is_update and self.software == 'g16' and hasattr(old_qc_data,'fctype'):
+            self.qc_data._mod_attr('fctype',old_qc_data.fctype)
+        if self.qc_data != old_qc_data: self._job._workflow._branch._system.should_save = True
         return self.qc_data
 
     ##################################
