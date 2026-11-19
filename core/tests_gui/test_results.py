@@ -357,7 +357,9 @@ def test_notebook_template_is_valid_code_even_with_windows_paths():
     assert not any(".save(" in src for src in code) and "get_T12" not in "".join(code)                                       # read-only; no scope_sco writes
     program, args = notebooks.jupyter_command("/p/Notebooks/w.ipynb", "/p/Notebooks")
     assert program == sys.executable and args[:3] == ["-m", "jupyter", "lab"] and "--ServerApp.root_dir=/p/Notebooks" in args and args[-1] == "/p/Notebooks/w.ipynb"
-    assert notebooks.jupyter_environment({"A": "1"}) == {"A": "1", "JUPYTER_PREFER_ENV_PATH": "1"}
+    env = notebooks.jupyter_environment({"A": "1"}); own = os.path.join(sys.prefix, "share", "jupyter", "lab")
+    assert env["A"] == "1" and env["JUPYTER_PREFER_ENV_PATH"] == "1" and env["JUPYTERLAB_DIR"] == own                       # this environment's JupyterLab files only
+    assert notebooks.jupyter_environment({"JUPYTERLAB_DIR": "/mine"})["JUPYTERLAB_DIR"] == "/mine"
     assert notebooks.notebook_url({"url": "http://localhost:8890/", "token": "abc"}, "/p/Notebooks", "/p/Notebooks/my water.ipynb") == "http://localhost:8890/lab/tree/my%20water.ipynb?token=abc"
 
 def test_the_generated_notebook_runs_on_a_fresh_system(local, tmp_path, monkeypatch):
@@ -485,3 +487,22 @@ def test_open_in_notebook_writes_it_and_starts_or_reuses_jupyter(local, tmp_path
     proc.alive = False                                                                                                            # quit from Jupyter's own menu
     assert tab.close_jupyter() and tab.jupyter is None and stopped == []                                                          # nothing running: no question, no signal
     win.close()
+
+def test_a_real_jupyter_lab_serves_its_settings(tmp_path):
+    """Starts Jupyter Lab as the page does (without a browser) and asks for what its page loads first. On the user's Mac an older
+    system-wide JupyterLab left a schema in /usr/local/share/jupyter/lab that made /lab/api/settings fail, and the page stayed blank."""
+    import urllib.request
+    pytest.importorskip("jupyterlab")
+    root = tmp_path / "Notebooks"; root.mkdir()
+    path = notebooks.write_new(str(root), notebooks.build("/x/scope_env.npy", "w"), "w")
+    program, args = notebooks.jupyter_command(path, str(root))
+    proc = notebooks.spawn(program, args[:-1] + ["--no-browser", "--ServerApp.port_retries=50", args[-1]], notebooks.jupyter_environment(os.environ), str(tmp_path / "log.txt"))
+    try:
+        server, t0 = None, time.time()
+        while server is None and proc.poll() is None and time.time() - t0 < 90: time.sleep(0.5); server = notebooks.running_server(str(root))
+        assert server, (tmp_path / "log.txt").read_text()[-2000:]
+        for api in ("lab/api/settings", "lab/api/themes", "api/kernelspecs"):
+            with urllib.request.urlopen(f"{server['url']}{api}?token={server['token']}", timeout=30) as r: assert r.status == 200, api
+        with urllib.request.urlopen(notebooks.notebook_url(server, str(root), path), timeout=30) as r: assert r.status == 200
+    finally:
+        notebooks.stop(proc); proc.wait(timeout=30)

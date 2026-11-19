@@ -223,9 +223,16 @@ def jupyter_command(path: str, root: str) -> tuple:
     return sys.executable, ["-m", "jupyter", "lab", f"--ServerApp.root_dir={root}", path]
 
 def jupyter_environment(base: dict) -> dict:
-    """Environment for Jupyter: kernels of this Python's environment are preferred over ones in the user's folders (JUPYTER_PREFER_ENV_PATH),
-    so a 'python3' kernel defined elsewhere cannot take the notebook to another Python."""
-    return dict(base) | {"JUPYTER_PREFER_ENV_PATH": "1"}
+    """Environment for Jupyter Lab, so that it uses only what this Python's environment installed:
+    - JUPYTER_PREFER_ENV_PATH: kernels of this environment come before ones in the user's folders, so a 'python3' kernel defined
+      elsewhere cannot take the notebook to another Python;
+    - JUPYTERLAB_DIR: JupyterLab's own files (settings schemas, themes) from this environment. Without it, files left in
+      /usr/local/share/jupyter/lab by an older system-wide JupyterLab are read too; one of them made every settings request fail
+      (HTTP 500) and the page stayed blank. A JUPYTERLAB_DIR the user set is kept."""
+    env = dict(base) | {"JUPYTER_PREFER_ENV_PATH": "1"}
+    own = os.path.join(sys.prefix, "share", "jupyter", "lab")
+    if "JUPYTERLAB_DIR" not in env and os.path.isdir(own): env["JUPYTERLAB_DIR"] = own
+    return env
 
 def running_server(root: str) -> "dict | None":
     """A Jupyter server of this user that serves `root` and is still alive (Jupyter's own list of running servers, which drops dead ones),
