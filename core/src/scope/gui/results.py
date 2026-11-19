@@ -227,6 +227,16 @@ class _RDKitDepickle:
         except Exception: here = ""
         return f"{self.count} RDKit molecule(s) stored by a newer RDKit ({self.versions}{here}). They were read; derived RDKit data could differ."
 
+def load_quietly(path: str, say: bool=True) -> tuple:
+    """(object, note) of a SCOPE pickle, read with RDKit's per-molecule 'newer version' warnings counted into `note` instead of printed.
+    With `say`, the note is printed once, on one line, so the terminal still tells that the file came from a newer RDKit. Every GUI
+    reader of a system file (Systems page, structure view, Results page) goes through here."""
+    import sys
+    from scope.read_write import load_binary
+    with _RDKitDepickle() as quiet: obj = load_binary(path)
+    if say and quiet.note: print(f"[SCOPE GUI] {os.path.basename(path)}: {quiet.note}", file=sys.stderr, flush=True)
+    return obj, quiet.note
+
 def open_system(env, system: str, file: str="") -> tuple:
     """Loads a system and points its paths at the folders of `env` on this computer, without saving anything or creating folders.
 
@@ -252,7 +262,7 @@ def open_system(env, system: str, file: str="") -> tuple:
         if file: raise ResultsError("no_system", f"File not found: {path}", "The copy may have been deleted or moved.")
         raise ResultsError("no_system", f"No system file for '{system}': {path}", "Run the system (Run page), or download its results from the cluster (Cluster page).")
     try:
-        with _RDKitDepickle() as quiet: obj = load_binary(path)
+        obj, rdkit_note = load_quietly(path, say=False)                         ## the page shows the note itself
     except ModuleNotFoundError as exc:
         top = (exc.name or "").split(".")[0]; pkg = ADDONS.get(top, top)
         raise ResultsError("addon", f"'{system}' was saved with the SCOPE add-on '{top}', which is not installed here.", f"Install it in the Python that runs this window:  {os.path.basename(_python())} -m pip install {pkg}")
@@ -261,7 +271,7 @@ def open_system(env, system: str, file: str="") -> tuple:
     st = os.stat(path); stored = getattr(obj, "computations_path", "")
     remap(obj, env, system)
     prov = Provenance(system, path, st.st_size, st.st_mtime, str(getattr(obj, "version", "")), str(getattr(scope, "__version__", "")), env_file, stored, obj.computations_path,
-                      sorted(glob.glob(glob.escape(own) + ".bak-*"), reverse=True), own, quiet.note)
+                      sorted(glob.glob(glob.escape(own) + ".bak-*"), reverse=True), own, rdkit_note)
     return obj, prov
 
 def remap(obj: object, env: object, system: str) -> None:

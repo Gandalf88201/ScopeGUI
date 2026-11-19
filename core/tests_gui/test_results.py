@@ -590,3 +590,27 @@ def test_plots_zoom_on_a_dragged_region_and_reset(local):
     canvas.plot(Lines("other", "T (K)", "G", [("a", [1, 2], [3, 4])])); assert canvas.view is None   # another plot: zoom dropped
     assert "T 1.5" in canvas.readout(1.5, 3.5)
     panel.close()
+
+def test_no_button_of_the_compare_tab_is_cut(local):
+    """The Compare tab's 'Tick all' and 'Only this one' fit their text at the default window size (side by side they were cut)."""
+    from PySide6.QtWidgets import QApplication
+    from scope.gui.window import MainWindow
+    app = QApplication.instance() or QApplication([])
+    env, info = local
+    win = MainWindow(); win.resize(1240, 800); win.show(); win.session.set_environment(env, info); win.show_step("results"); tab = win.results_tab
+    assert wait_for(app, lambda: tab.loaded is not None)
+    tab.tabs.setCurrentIndex(4); app.processEvents()
+    for b in (tab.compare.all_btn, tab.compare.this_btn, tab.compare.go):
+        assert b.isVisible() and b.width() >= b.sizeHint().width(), (b.text(), b.width(), b.sizeHint().width())
+    tab.compare.this_btn.click(); assert tab.compare.chosen() == ["water"]
+    win.close()
+
+@needs_tutorials
+def test_the_systems_page_reads_tutorial_1_without_an_rdkit_flood(tmp_path, capfd):
+    """The Systems page (summary and structure view) reads system files too: there as well, RDKit's two lines per molecule become one line."""
+    pytest.importorskip("scope_sco")
+    from scope.gui import structure
+    root = tmp_path / "T1"; shutil.copytree(os.path.join(ABITEM, "Systems"), root / "Systems")
+    path = str(root / "Systems" / "ABITEM" / "ABITEM.npy")
+    capfd.readouterr(); backend.system_details(path); structure.structures_of(path); err = capfd.readouterr().err
+    assert "Depickling" not in err and err.count("\n") <= 2 and all(l.startswith("[SCOPE GUI] ABITEM.npy:") for l in err.splitlines())

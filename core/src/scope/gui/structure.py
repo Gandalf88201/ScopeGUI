@@ -86,8 +86,8 @@ def structures_of(system_file: str) -> list:
     A state with its own coordinates and the same atoms keeps the source's bonds (SCOPE's connectivity); otherwise bonds are guessed.
     Returns [] if the file is not a SCOPE system.
     """
-    from scope.read_write import load_binary
-    system = load_binary(system_file)
+    from scope.gui.results import load_quietly
+    system, _ = load_quietly(system_file)
     if getattr(system, "object_type", None) != "system": return []
     return structures_from(system)
 

@@ -13,7 +13,7 @@ import time
 from PySide6.QtCore    import QThreadPool, QTimer, QUrl, Qt
 from PySide6.QtGui     import QBrush, QColor, QDesktopServices, QFont, QGuiApplication, QTextCursor
 from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QDialog, QDoubleSpinBox, QFileDialog, QGridLayout, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget, QListWidgetItem,
-                               QFrame, QMenu, QMessageBox, QPlainTextEdit, QPushButton, QScrollArea, QSplitter, QTableWidget, QTableWidgetItem, QTabWidget, QToolButton, QTreeWidget,
+                               QFrame, QMenu, QMessageBox, QPlainTextEdit, QPushButton, QScrollArea, QSizePolicy, QSplitter, QTableWidget, QTableWidgetItem, QTabWidget, QToolButton, QTreeWidget,
                                QTreeWidgetItem, QVBoxLayout, QWidget)
 from scope.gui import backend, notebooks, results, theme
 from scope.gui.tasks import Task
@@ -400,9 +400,12 @@ class ComparePanel(QWidget):
         from scope.gui.plots import PlotCanvas, PlotPanel
         self.page, self.cache, self.rows, self.task, self.order, self.done_quantity, self.done_temp, self.provs, self.done_settings = page, {}, [], None, [], "energy", 298.15, [], {}
         self.list = QListWidget(); self.list.setFixedWidth(140); self.list.setToolTip("Systems to compare (tick them)")
-        all_btn, this_btn = QPushButton("All"), QPushButton("Only this"); all_btn.clicked.connect(lambda: self.tick(True)); this_btn.clicked.connect(lambda: self.tick(False))
-        self.list.setObjectName("navlist"); lb = QHBoxLayout(); lb.setSpacing(6); lb.addWidget(all_btn); lb.addWidget(this_btn)
-        left = card(self.list, lb, title="Systems"); left.setFixedWidth(150); self.list.setMinimumWidth(10); self.list.setFixedWidth(122)
+        self.all_btn, self.this_btn = QPushButton("Tick all"), QPushButton("Only this one")
+        self.all_btn.clicked.connect(lambda: self.tick(True)); self.this_btn.clicked.connect(lambda: self.tick(False))
+        self.all_btn.setToolTip("Compare every system of the workspace"); self.this_btn.setToolTip("Compare only the system shown on this page")
+        self.list.setObjectName("navlist"); lb = QVBoxLayout(); lb.setSpacing(6)                  ## stacked, full width: side by side they do not fit
+        for b in (self.all_btn, self.this_btn): b.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed); lb.addWidget(b)
+        left = card(self.list, lb, title="Systems"); left.setFixedWidth(172); self.list.setMinimumWidth(10)
         self.quantity = combo(["Electronic energy", "Gibbs energy G(T)"]); self.temp = spin(1, 5000, 298.15, 10, 2, " K")
         self.model, self.imag, self.units = combo(results.MODELS), combo(results.IMAGINARY, IMAG_TIP), combo(list(results.UNITS)[1:])
         self.go = QPushButton("Compare"); self.go.setProperty("primary", True); self.go.clicked.connect(self.run)
