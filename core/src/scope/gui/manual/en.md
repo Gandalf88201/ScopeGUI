@@ -482,7 +482,7 @@ The numbers are SCOPE's own (`state.get_thermal_data`), per formula unit (cells:
 |---|---|
 | Where are notebooks written? | In `<project>/Notebooks/`, next to *Sources*, *Systems* and *Computations*. Uploads and downloads never touch this folder |
 | Will my edits be overwritten? | No. A notebook is written once; the next one is `<system>-2.ipynb`, then `-3`, and so on |
-| Which Python runs it? | The Python of this window, so the same SCOPE and add-ons. The first cell says so, and warns if the kernel is another Python |
+| Which Python runs it? | The Python of this window, so the same SCOPE and add-ons. **Open in notebook** registers a Jupyter kernel called *SCOPE GUI (Python 3.x)* for that Python (in your Jupyter folder, on macOS `~/Library/Jupyter/kernels/scope-gui`), and the notebook asks for it by name. So another Jupyter (one started with `jupyter lab` in a terminal, VS Code, Anaconda) also runs it with SCOPE. The first cell says which Python runs it |
 | One Jupyter or many? | One per window. A second notebook opens in the Jupyter Lab that is already running |
 | What happens when I close the window? | If Jupyter Lab started from this window is still running, you choose: **Stop it and close** (save your notebooks in the browser first) or **Keep it running** |
 | I use VS Code or another editor | Use the arrow of **Open in notebook → Copy code**: the first cell, which opens the system as this page does, goes to the clipboard |
@@ -573,7 +573,8 @@ Worth knowing:
 | Results: no ΔE for a state | No other state has the same formula and method, so the energies cannot be compared | Expected |
 | Results: *Jupyter Lab is not installed in this window's Python* | The notebook was written, but Jupyter Lab is missing | Run the install command shown, or open the notebook in VS Code |
 | Results: the notebook does not open in the browser | Jupyter Lab is starting, or failed to | Wait a few seconds; its messages are in `Notebooks/.jupyter-scope-gui.log` |
-| Notebook: *this kernel is not the Python of the SCOPE window* | Jupyter chose another kernel | In Jupyter Lab, *Kernel → Change kernel* and choose *Python 3* of the SCOPE window, or start Jupyter from the window again |
+| Notebook: *this kernel is not the Python of the SCOPE window* | Jupyter chose another kernel | In Jupyter, *Kernel → Change kernel* and choose *SCOPE GUI*, or open the notebook from the window again |
+| Notebook: *This kernel runs … which does not have SCOPE* | The notebook runs in another Python, for instance a Jupyter started from a terminal, whose *Python 3* kernel is not the GUI's | *Kernel → Change kernel → SCOPE GUI*. Notebooks written before the SCOPE GUI kernel existed ask for *Python 3*; change it once and save |
 | A cluster job fails at once with `TMPDIR: parameter null or not set` | SCOPE's job script needs the variable `TMPDIR` on the compute node | Ask the cluster support, or set it in your shell profile |
 
 ## Glossary

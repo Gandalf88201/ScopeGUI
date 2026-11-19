@@ -182,7 +182,43 @@ The SCOPE objects are all here: `system.sources`, each source's `.states`, each 
 example `system.sources[0].states[-1].results`. `results.read_log(path)` reads an output file (see `prov.local_root`). Remember: no
 `system.save()`."""
 
-def build(env_path: str, system: str, state: "tuple | None"=None, pair: "tuple | None"=None, file: str="") -> object:
+#################
+### Kernel    ###
+#################
+KERNEL_NAME = "scope-gui"
+
+def kernel_spec() -> dict:
+    """The Jupyter kernel 'SCOPE GUI': the Python of this window, by its full path, so whichever Jupyter opens a notebook of the GUI
+    (the one the window starts, a system-wide one, VS Code, Anaconda) runs it with this SCOPE and its add-ons."""
+    return {"argv": [sys.executable, "-m", "ipykernel_launcher", "-f", "{connection_file}"],
+            "display_name": f"SCOPE GUI (Python {sys.version_info[0]}.{sys.version_info[1]})", "language": "python",
+            "metadata": {"debugger": True, "scope_gui": {"prefix": sys.prefix}}}
+
+def kernel_dir() -> str:
+    """Where the kernel is registered: the user's Jupyter data folder (macOS ~/Library/Jupyter/kernels/scope-gui), which every Jupyter of
+    this user reads."""
+    from jupyter_core.paths import jupyter_data_dir
+    return os.path.join(jupyter_data_dir(), "kernels", KERNEL_NAME)
+
+def ensure_kernel() -> str:
+    """Registers (or corrects) the 'SCOPE GUI' kernel so that it runs this window's Python, and returns the kernel name to write in a
+    notebook: 'scope-gui', or 'python3' if the kernel cannot be registered (no ipykernel, or the folder cannot be written). Only its own
+    folder is written; other kernels are not touched."""
+    import json
+    if importlib.util.find_spec("ipykernel") is None: return "python3"
+    try:
+        folder = kernel_dir(); path = os.path.join(folder, "kernel.json"); want = kernel_spec()
+        try:
+            with open(path) as fh: have = json.load(fh)
+        except (OSError, ValueError): have = None
+        if have != want:
+            os.makedirs(folder, exist_ok=True)
+            with open(path + ".tmp", "w") as fh: json.dump(want, fh, indent=1)
+            os.replace(path + ".tmp", path)
+        return KERNEL_NAME
+    except Exception: return "python3"
+
+def build(env_path: str, system: str, state: "tuple | None"=None, pair: "tuple | None"=None, file: str="", kernel: str="python3") -> object:
     """The notebook (an nbformat NotebookNode) for one system. `state` and `pair` are the defaults the page has shown ((source, state), and
     ((source, state), (source, state)) for ΔG); the notebook falls back to the first suitable ones itself, so it runs on any system."""
     import nbformat
@@ -193,7 +229,8 @@ def build(env_path: str, system: str, state: "tuple | None"=None, pair: "tuple |
              new_markdown_cell(STATES_MD), new_code_cell(STATES), new_markdown_cell(ENERGY_MD), new_code_cell(ENERGY),
              new_markdown_cell(IR_MD), new_code_cell(IR.replace("__STATE__", repr(as_tuple(state)))), new_markdown_cell(THERMO_MD), new_code_cell(THERMO),
              new_markdown_cell(DELTA_MD), new_code_cell(DELTA.replace("__PAIR__", repr((as_tuple(pair[0]), as_tuple(pair[1])) if pair else None))), new_markdown_cell(NEXT_MD)]
-    nb = new_notebook(cells=cells, metadata={"kernelspec": {"name": "python3", "display_name": "Python 3", "language": "python"},
+    display = kernel_spec()["display_name"] if kernel == KERNEL_NAME else "Python 3"
+    nb = new_notebook(cells=cells, metadata={"kernelspec": {"name": kernel, "display_name": display, "language": "python"},
                                              "language_info": {"name": "python"}, "scope_gui": {"env_file": env_path, "system": system, "file": file}})
     nbformat.validate(nb)
     return nb

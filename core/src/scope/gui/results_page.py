@@ -788,7 +788,8 @@ class ResultsTab(QWidget):
         state = self.state.keys[self.state.chooser.currentIndex()] if 0 <= self.state.chooser.currentIndex() < len(self.state.keys) else None
         pair = (self.thermo.a.currentData(), self.thermo.b.currentData()) if self.thermo.a.currentData() and self.thermo.b.currentData() else None
         folder = notebooks.notebooks_dir(info)
-        try: path = notebooks.write_new(folder, notebooks.build(info.filepath, system, state, pair, file), system)
+        kernel = notebooks.ensure_kernel()                                             ## 'SCOPE GUI' kernel: this window's Python, for any Jupyter
+        try: path = notebooks.write_new(folder, notebooks.build(info.filepath, system, state, pair, file, kernel), system)
         except Exception as exc: self.say(f"Cannot write the notebook in {folder}: {type(exc).__name__}: {exc}", "err"); return None
         missing = notebooks.jupyter_missing()
         if missing: self.say(f"Notebook written: <code>{path}</code>. Jupyter Lab is not installed in this window's Python; install it with <code>{missing}</code>, or open the file in VS Code.", "warn"); return path

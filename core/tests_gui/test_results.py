@@ -328,7 +328,7 @@ def run_notebook(path, monkeypatch) -> str:
     from nbclient import NotebookClient
     monkeypatch.setenv("JUPYTER_PREFER_ENV_PATH", "1"); monkeypatch.delenv("MPLBACKEND", raising=False)
     nb = nbformat.read(path, as_version=4)
-    NotebookClient(nb, kernel_name="python3", timeout=600, resources={"metadata": {"path": os.path.dirname(path)}}).execute()
+    NotebookClient(nb, kernel_name=nb.metadata.kernelspec.name, timeout=600, resources={"metadata": {"path": os.path.dirname(path)}}).execute()          # the kernel the notebook names
     out, images = [], 0
     for c in nb.cells:
         for o in c.get("outputs", []):
@@ -366,7 +366,9 @@ def test_the_generated_notebook_runs_on_a_fresh_system(local, tmp_path, monkeypa
     """R4's check on a system with nothing computed: every cell runs, says why there is nothing to show, and only Notebooks/ is new."""
     pytest.importorskip("nbclient")
     env, info = local; root = tmp_path / "L"; before = tree(root)
-    path = notebooks.write_new(notebooks.notebooks_dir(info), notebooks.build(info.filepath, "water"), "water")
+    assert notebooks.kernel_dir().startswith(str(tmp_path))                                                                # never the user's real Jupyter folder
+    kernel = notebooks.ensure_kernel(); assert kernel == "scope-gui"                                                       # registered in the test's own HOME
+    path = notebooks.write_new(notebooks.notebooks_dir(info), notebooks.build(info.filepath, "water", kernel=kernel), "water")
     assert path == str(root / "Notebooks" / "water.ipynb")
     text = run_notebook(path, monkeypatch)
     assert "0 of 1 sources" in text and "No state has frequencies yet" in text and "no ΔG to show" in text
@@ -543,3 +545,19 @@ def test_the_notebook_says_which_python_lacks_scope():
     code = notebooks.setup_code("/x/scope_env.npy", "water")
     out = subprocess.run([sys.executable, "-I", "-S", "-c", code], capture_output=True, text=True)
     assert out.returncode != 0 and "ModuleNotFoundError: This kernel runs" in out.stderr and sys.executable in out.stderr and "Open in notebook" in out.stderr
+
+def test_the_scope_gui_kernel_runs_this_python_and_is_corrected():
+    """'Open in notebook' registers the 'SCOPE GUI' kernel in the user's Jupyter folder (here the test's HOME), pointing at this Python by
+    full path, so a system-wide Jupyter or VS Code runs the notebook with SCOPE. A kernel left by another Python is corrected."""
+    import json
+    folder = notebooks.kernel_dir()
+    assert folder.startswith(os.environ["HOME"]) and os.environ["HOME"] != os.path.expanduser("~" + os.environ.get("USER", ""))   # isolated, never the real one
+    assert notebooks.ensure_kernel() == "scope-gui"
+    spec = json.load(open(os.path.join(folder, "kernel.json")))
+    assert spec["argv"][:3] == [sys.executable, "-m", "ipykernel_launcher"] and spec["display_name"].startswith("SCOPE GUI (Python 3.")
+    json.dump({"argv": ["/old/python", "-m", "ipykernel_launcher", "-f", "{connection_file}"], "display_name": "x", "language": "python"}, open(os.path.join(folder, "kernel.json"), "w"))
+    assert notebooks.ensure_kernel() == "scope-gui" and json.load(open(os.path.join(folder, "kernel.json")))["argv"][0] == sys.executable
+    from jupyter_client.kernelspec import KernelSpecManager
+    assert KernelSpecManager().get_kernel_spec("scope-gui").argv[0] == sys.executable                                          # Jupyter finds it
+    nb = notebooks.build("/x/e.npy", "w", kernel="scope-gui"); assert nb.metadata.kernelspec.name == "scope-gui"
+    assert notebooks.build("/x/e.npy", "w").metadata.kernelspec.name == "python3"
