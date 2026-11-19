@@ -19,6 +19,9 @@ dependencies = [
     "PyYAML>=6.0.1",
 ]
 
+[project.optional-dependencies]
+gui = ["PySide6-Essentials>=6.6"]
+
 # Where your CLI entry point lives
 [project.scripts]
 # General
@@ -29,6 +32,7 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 "scope" = ["cshm.yaml"]
+"scope.gui" = ["manual/*.md"]
 "scope.software.quantum_espresso" = [
     "PP_Libraries/Vanderbilt_USPP/*.UPF",
     "PP_Libraries/Vanderbilt_USPP/*.upf",

@@ -1,2 +1,6 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+
+# Launchers: the Windows one needs CRLF, the shell one must stay LF
+scope-gui.bat text eol=crlf
+scope-gui text eol=lf
