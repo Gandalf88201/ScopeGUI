@@ -47,13 +47,21 @@ def setup_code(env_path: str, system: str, file: str="") -> str:
     copy = f"\nFILE     = {file!r}                              # an older copy of the system file, read instead of the current one" if file else ""
     return f'''import os
 import sys
-import scope
-from scope.gui import results
 
 ENV_FILE = {env_path!r}
 SYSTEM   = {system!r}{copy}
 GUI_PYTHON = {sys.executable!r}       # the Python of the SCOPE window that wrote this notebook
 GUI_PREFIX = {sys.prefix!r}
+
+try:
+    import scope
+    from scope.gui import results
+except ModuleNotFoundError as exc:
+    raise ModuleNotFoundError(
+        f"This kernel runs {{sys.executable}} (Python {{sys.version.split()[0]}}), which does not have SCOPE ({{exc}}). "
+        f"Run this notebook with the Python of the SCOPE window, {{GUI_PYTHON}}: open it from the SCOPE window "
+        f"(Results, Open in notebook), or in Jupyter choose Kernel, Change kernel, and pick that Python. "
+        f"A Jupyter started from a terminal ('jupyter lab') may use another Python.") from None
 
 # The same entry point as the Results page: the system file is read and its paths are pointed at this computer's folders, in memory only.
 # RDKit's per-molecule warnings about a newer RDKit are counted into prov.rdkit_note (printed below) instead of filling this cell.

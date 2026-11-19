@@ -535,3 +535,11 @@ def test_reading_tutorial_1_prints_no_rdkit_flood(tmp_path, capfd):
     capfd.readouterr(); obj, prov = results.open_system(info.filepath, "ABITEM"); err = capfd.readouterr().err
     assert "Depickling" not in err and err.count("\n") < 5
     assert not prov.rdkit_note or (prov.rdkit_note in results.header(prov) and "newer RDKit" in prov.rdkit_note)                # one line, also in exports
+
+def test_the_notebook_says_which_python_lacks_scope():
+    """Run with a Python that has no SCOPE (here: no scope on the path, as the system Jupyter's kernel on the user's Mac), the first cell
+    names that Python and the one to use, instead of a bare ModuleNotFoundError."""
+    import subprocess
+    code = notebooks.setup_code("/x/scope_env.npy", "water")
+    out = subprocess.run([sys.executable, "-I", "-S", "-c", code], capture_output=True, text=True)
+    assert out.returncode != 0 and "ModuleNotFoundError: This kernel runs" in out.stderr and sys.executable in out.stderr and "Open in notebook" in out.stderr
