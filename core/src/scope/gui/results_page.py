@@ -399,6 +399,7 @@ class ComparePanel(QWidget):
         super().__init__()
         from scope.gui.plots import PlotCanvas, PlotPanel
         self.page, self.cache, self.rows, self.task, self.order, self.done_quantity, self.done_temp, self.provs, self.done_settings = page, {}, [], None, [], "energy", 298.15, [], {}
+        self.env_key, self.generation = None, 0
         self.list = QListWidget(); self.list.setFixedWidth(140); self.list.setToolTip("Systems to compare (tick them)")
         self.all_btn, self.this_btn = QPushButton("Tick all"), QPushButton("Only this one")
         self.all_btn.clicked.connect(lambda: self.tick(True)); self.this_btn.clicked.connect(lambda: self.tick(False))
@@ -426,12 +427,22 @@ class ComparePanel(QWidget):
         g = self.quantity.currentIndex() == 1
         for w in (self.temp, self.model, self.imag): w.setVisible(g)
 
-    def set_systems(self, names: list, current: str) -> None:
+    def set_systems(self, names: list, current: str, env_key: str="") -> None:
+        """The systems of the workspace shown. Another environment (a workspace or project switched) starts the comparison afresh: the
+        table, plot, cache and ticks of the previous one are dropped, and a comparison of it still running is ignored when it ends."""
+        if env_key != self.env_key:
+            self.env_key, self.cache = env_key, {}; self.list.clear(); self.reset()
         ticked = {self.list.item(i).text() for i in range(self.list.count()) if self.list.item(i).checkState() == Qt.Checked}
+        if any(r.system not in names for r in self.rows): self.reset()                                    ## a system shown was removed
         self.list.clear()
         for n in names:
             it = QListWidgetItem(n); it.setFlags(it.flags() | Qt.ItemIsUserCheckable); it.setCheckState(Qt.Checked if n in ticked or n == current else Qt.Unchecked); self.list.addItem(it)
         self.cache = {k: v for k, v in self.cache.items() if k in names}
+
+    def reset(self) -> None:
+        self.generation += 1; self.rows, self.provs, self.order, self.done_settings = [], [], [], {}
+        self.table.setRowCount(0); self.canvas.show_message(""); theme.set_kind(self.status, "")
+        self.status.setText("Tick systems and press Compare. Δ is measured from the lowest value among states with the same formula and method.")
 
     def tick(self, everything: bool) -> None:
         current = self.page.current()
@@ -443,7 +454,7 @@ class ComparePanel(QWidget):
     def run(self) -> None:
         names, info = self.chosen(), self.page.session.info
         if not names or not info or self.task is not None: return
-        env_path, current = info.filepath, self.page.loaded
+        env_path, current, generation = info.filepath, self.page.loaded, self.generation
         cache = dict(self.cache)
         quantity, temp, model, imag = ("energy" if self.quantity.currentIndex() == 0 else "gibbs"), self.temp.value(), self.model.currentText(), self.imag.currentText()
         def work():
@@ -451,7 +462,7 @@ class ComparePanel(QWidget):
             for n in names:
                 if current is not None and current.provenance.system == n: L = current
                 else:
-                    path = os.path.join(info.systems_path, n, f"{n}.npy"); fp = results.fingerprint(path)
+                    path = os.path.join(info.systems_path, n, f"{n}.npy"); fp = (path,) + results.fingerprint(path)        ## the file, not only its name
                     hit = cache.get(n)
                     if hit and hit[0] == fp: L = hit[1]
                     else:
@@ -461,11 +472,13 @@ class ComparePanel(QWidget):
             return results.compare_rows(loadeds, quantity, temp, model, imag), errors, cache, quantity, temp, [L.provenance for L in loadeds], {"model": model, "imaginary": imag} if quantity == "gibbs" else {}
         self.go.setEnabled(False); self.status.setText(f"Comparing {len(names)} system(s)…")
         task = Task(work); self.task = task
-        task.signals.done.connect(self.done); task.signals.failed.connect(lambda m: (setattr(self, "task", None), self.go.setEnabled(True), self.status.setText(f"Failed: {m}")))
+        task.signals.done.connect(lambda out, g=generation: self.done(out, g))
+        task.signals.failed.connect(lambda m, g=generation: (setattr(self, "task", None), self.go.setEnabled(True), self.status.setText(f"Failed: {m}") if g == self.generation else None))
         QThreadPool.globalInstance().start(task)
 
-    def done(self, out) -> None:
+    def done(self, out, generation: "int | None"=None) -> None:
         self.task = None; self.go.setEnabled(True)
+        if generation is not None and generation != self.generation: return                         ## for an environment no longer shown
         self.rows, errors, self.cache, self.done_quantity, self.done_temp, self.provs, self.done_settings = out
         rel = results.compare_relative(self.rows); groups = len({(r.formula, r.method) for r in self.rows if (r.system, r.source, r.state) in rel})
         what = "electronic energies" if self.done_quantity == "energy" else f"G at {self.done_temp:g} K (per formula unit)"
@@ -633,7 +646,7 @@ class ResultsTab(QWidget):
         current = self.systems.currentItem().text() if self.systems.currentItem() else ""
         names = [r.name for r in self.session.systems()] if self.session.info else []
         self.systems.blockSignals(True); self.systems.clear(); self.systems.addItems(names); self.systems.blockSignals(False)
-        self.compare.set_systems(names, names[0] if names and current not in names else current)
+        self.compare.set_systems(names, names[0] if names and current not in names else current, self.session.info.filepath if self.session.info else "")
         if not names: self.clear("No system in this workspace yet. Import one on the Systems page." if self.session.info else "Open or create an environment first (step 1)."); return
         keep = current if current in names else names[0]
         self.systems.blockSignals(True); self.systems.setCurrentRow(names.index(keep)); self.systems.blockSignals(False)

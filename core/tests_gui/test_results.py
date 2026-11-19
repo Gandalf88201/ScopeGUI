@@ -614,3 +614,26 @@ def test_the_systems_page_reads_tutorial_1_without_an_rdkit_flood(tmp_path, capf
     path = str(root / "Systems" / "ABITEM" / "ABITEM.npy")
     capfd.readouterr(); backend.system_details(path); structure.structures_of(path); err = capfd.readouterr().err
     assert "Depickling" not in err and err.count("\n") <= 2 and all(l.startswith("[SCOPE GUI] ABITEM.npy:") for l in err.splitlines())
+
+def test_compare_starts_afresh_in_another_environment(local, tmp_path):
+    """Switching workspace or project drops the Compare table, plot and cache of the previous one, and a comparison of the previous one
+    that ends after the switch is ignored (on the user's Mac, ABITEM's rows stayed on screen in another project)."""
+    from PySide6.QtWidgets import QApplication
+    from scope.gui.window import MainWindow
+    app = QApplication.instance() or QApplication([])
+    env, info = local
+    win = MainWindow(); win.show(); win.session.set_environment(env, info); win.show_step("results"); tab = win.results_tab; cmp = tab.compare
+    assert wait_for(app, lambda: tab.loaded is not None)
+    R = results.CompareRow
+    rows = [R("water", "a", "opt", "H2-O", "g16 pbe", -76.0), R("water", "b", "opt", "H2-O", "g16 pbe", -76.01)]
+    cmp.done((rows, [], {"water": (("x",), None)}, "energy", 298.15, [], {}), cmp.generation)
+    assert cmp.table.rowCount() == 2 and cmp.canvas.last is not None and cmp.cache
+    stale = cmp.generation
+    other = tmp_path / "O"; env2, info2 = backend.create_environment("other", str(other / "Sources"), str(other / "Systems"), str(other / "Computations"), str(other))
+    x = tmp_path / "benzene.xyz"; x.write_text("3\nb\nC 0 0 0\nH 0 0 1.1\nH 0 1.1 0\n"); backend.import_xyz(env2, str(x))
+    win.session.set_environment(env2, info2); app.processEvents()
+    assert cmp.rows == [] and cmp.table.rowCount() == 0 and cmp.canvas.last is None and cmp.cache == {}
+    assert [cmp.list.item(i).text() for i in range(cmp.list.count())] == ["benzene"] and "Tick systems" in cmp.status.text()
+    cmp.done((rows, [], {}, "energy", 298.15, [], {}), stale)                                              # the old comparison ends late
+    assert cmp.rows == [] and cmp.table.rowCount() == 0
+    win.close()
