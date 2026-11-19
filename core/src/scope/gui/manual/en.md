@@ -448,6 +448,8 @@ In the Overview the status is that of the **last** calculation of the state, who
 
 A state with no frequencies and no excited states (an `initial` state, a single point) shows its structure. Spectra are computed in memory: nothing is written to the project.
 
+**Zoom on any plot.** Drag across a plot to zoom into that region. A mostly horizontal drag zooms the x axis and fits the y axis to what is visible, which is the quickest way to look at one band of a spectrum. A rectangle zooms both axes. Double-click on the plot, or press **Reset view**, to see everything again. The zoom stays when you change the settings of the same plot (a broader width, another model), and **Save plot…** saves what is shown, zoom included. The line above the plot shows the value under the mouse.
+
 **The Thermochemistry tab.** It lists the states that have frequencies (a frequency job wrote them) and an energy. Choose a state, and optionally a second one to subtract.
 
 | Setting | Meaning |

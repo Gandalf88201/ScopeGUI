@@ -12,7 +12,7 @@ import os
 import time
 from PySide6.QtCore    import QThreadPool, QTimer, QUrl, Qt
 from PySide6.QtGui     import QBrush, QColor, QDesktopServices, QFont, QGuiApplication, QTextCursor
-from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QDialog, QDoubleSpinBox, QFileDialog, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget, QListWidgetItem,
+from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QDialog, QDoubleSpinBox, QFileDialog, QGridLayout, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget, QListWidgetItem,
                                QFrame, QMenu, QMessageBox, QPlainTextEdit, QPushButton, QScrollArea, QSplitter, QTableWidget, QTableWidgetItem, QTabWidget, QToolButton, QTreeWidget,
                                QTreeWidgetItem, QVBoxLayout, QWidget)
 from scope.gui import backend, notebooks, results, theme
@@ -67,6 +67,27 @@ class LogViewer(QDialog):
         if self.find.text() and not self.text.find(self.find.text()):
             self.text.moveCursor(QTextCursor.Start); self.text.find(self.find.text())
 
+def caption(text: str) -> QLabel:
+    label = QLabel(text); label.setObjectName("pagesub"); return label
+
+def hrow(*parts, stretch: bool=True, spacing: int=8) -> QHBoxLayout:
+    """A row of widgets; a str becomes a grey caption, None a wider gap."""
+    row = QHBoxLayout(); row.setSpacing(spacing); row.setContentsMargins(0, 0, 0, 0)
+    for part in parts:
+        if part is None: row.addSpacing(16)
+        elif isinstance(part, str): row.addWidget(caption(part))
+        elif isinstance(part, QWidget): row.addWidget(part)
+        else: row.addLayout(part)
+    if stretch: row.addStretch(1)
+    return row
+
+def card(*rows, title: str="") -> QFrame:
+    """A rounded panel (the Cluster page's cards) holding rows (layouts or widgets)."""
+    frame = QFrame(); frame.setObjectName("card"); lay = QVBoxLayout(frame); lay.setContentsMargins(14, 10, 14, 12); lay.setSpacing(8)
+    if title: head = QLabel(title); head.setObjectName("cardtitle"); lay.addWidget(head)
+    for r in rows: lay.addWidget(r) if isinstance(r, QWidget) else lay.addLayout(r)
+    return frame
+
 def scrolled(widget: QWidget) -> QScrollArea:
     """`widget` in a frameless scroll area: its minimum size no longer forces the window to grow; a small window scrolls instead."""
     area = QScrollArea(); area.setWidgetResizable(True); area.setFrameShape(QFrame.NoFrame); area.setWidget(widget)
@@ -80,30 +101,30 @@ class StatePanel(QWidget):
     Everything is read from the system in memory; the only files written are the ones the user saves (geometry, plot)."""
     def __init__(self, page: "ResultsTab"):
         super().__init__()
-        from scope.gui.plots import PlotCanvas
+        from scope.gui.plots import PlotCanvas, PlotPanel
         from scope.gui.structure_view import StructurePanel
         self.page, self.detail, self.keys = page, None, []
-        self.chooser = QComboBox(); self.chooser.setMinimumWidth(220); self.chooser.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon); self.chooser.setMinimumContentsLength(24); self.chooser.currentIndexChanged.connect(self.show_index)
+        self.chooser = QComboBox(); self.chooser.setMinimumWidth(220); self.chooser.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon); self.chooser.setMinimumContentsLength(22); self.chooser.currentIndexChanged.connect(self.show_index)
         self.summary = QLabel(); self.summary.setWordWrap(True); self.summary.setTextFormat(Qt.RichText); self.summary.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self.save_xyz_btn = QPushButton("Save geometry (.xyz)…"); self.save_xyz_btn.clicked.connect(self.save_xyz)
-        top = QHBoxLayout(); top.addWidget(QLabel("State")); top.addWidget(self.chooser); top.addStretch(1); top.addWidget(self.save_xyz_btn)
         self.summary.setMinimumWidth(10)                                                    ## wraps instead of widening the window
         self.structure = StructurePanel()
         ## spectrum controls
         self.kind = QComboBox(); self.kernel = QComboBox(); self.kernel.addItems(results.KERNELS)
+        self.kind.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon); self.kind.setMinimumContentsLength(14)
         self.width = QDoubleSpinBox(); self.width.setDecimals(2); self.width.setToolTip("Broadening width")
         self.auto = QCheckBox("Auto range"); self.auto.setChecked(True)
         self.lo, self.hi = QDoubleSpinBox(), QDoubleSpinBox()
-        for b in (self.lo, self.hi): b.setRange(-1000, 100000); b.setDecimals(0); b.setEnabled(False)
+        for b in (self.lo, self.hi): b.setRange(-1000, 100000); b.setDecimals(0); b.setVisible(False); b.setMinimumWidth(80)
+        self.dash = QLabel("–"); self.dash.setVisible(False)
         self.per_z = QCheckBox("Per formula unit"); self.per_z.setChecked(True); self.per_z.setToolTip("Divide by the number of formula units in the cell (Z)")
         self.save_plot_btn = QPushButton("Save plot…"); self.save_plot_btn.clicked.connect(self.save_plot)
-        row1 = QHBoxLayout(); [row1.addWidget(w) for w in (QLabel("Spectrum"), self.kind, QLabel("Kernel"), self.kernel, QLabel("Width"), self.width)]; row1.addStretch(1); row1.addWidget(self.save_plot_btn)
-        row2 = QHBoxLayout(); [row2.addWidget(w) for w in (self.auto, self.lo, QLabel("–"), self.hi, self.per_z)]; row2.addStretch(1)
-        ctl = QVBoxLayout(); ctl.setSpacing(4); ctl.addLayout(row1); ctl.addLayout(row2)
-        self.canvas = PlotCanvas()
+        self.width.setMinimumWidth(110)
+        ctl = hrow("Spectrum", self.kind, None, "Kernel", self.kernel, None, "Width", self.width, None, self.auto, self.lo, self.dash, self.hi, None, self.per_z)
+        self.canvas = PlotCanvas(); self.plot_panel = PlotPanel(self.canvas, [self.save_plot_btn])
         self.kind.currentIndexChanged.connect(self.kind_changed)
         for sig in (self.kernel.currentIndexChanged, self.width.valueChanged, self.lo.valueChanged, self.hi.valueChanged, self.per_z.toggled): sig.connect(self.plot)
-        self.auto.toggled.connect(lambda on: ([b.setEnabled(not on) for b in (self.lo, self.hi)], self.plot()))
+        self.auto.toggled.connect(lambda on: ([b.setVisible(not on) for b in (self.lo, self.dash, self.hi)], [b.setEnabled(not on) for b in (self.lo, self.hi)], self.plot()))
         ## frequencies
         self.modes = QTableWidget(0, 5); self.modes.setHorizontalHeaderLabels(["Mode", "Frequency (cm⁻¹)", "IR (km/mol)", "Red. mass (amu)", "Sym."])
         self.modes.setEditTriggers(QAbstractItemView.NoEditTriggers); self.modes.verticalHeader().setVisible(False)
@@ -111,11 +132,15 @@ class StatePanel(QWidget):
         self.modes_note = QLabel(); self.modes_note.setObjectName("pagesub"); self.modes_note.setWordWrap(True)
         copy_modes = QPushButton("Copy frequencies (CSV)"); copy_modes.clicked.connect(lambda: QGuiApplication.clipboard().setText(self.modes_text()) if self.detail else None)
         mrow = QHBoxLayout(); mrow.addWidget(self.modes_note, 1); mrow.addWidget(copy_modes)
-        freq_box = QWidget(); fl = QVBoxLayout(freq_box); fl.setContentsMargins(0, 0, 0, 0); fl.addLayout(mrow); fl.addWidget(self.modes, 1)
-        spec_box = QWidget(); sl = QVBoxLayout(spec_box); sl.setContentsMargins(0, 0, 0, 0); sl.addLayout(ctl); sl.addWidget(self.canvas, 1)
+        freq_box = QWidget(); fl = QVBoxLayout(freq_box); fl.setContentsMargins(10, 10, 10, 10); fl.setSpacing(8); fl.addLayout(mrow); fl.addWidget(self.modes, 1)
+        spec_box = QWidget(); sl = QVBoxLayout(spec_box); sl.setContentsMargins(10, 10, 10, 10); sl.setSpacing(10); sl.addLayout(ctl); sl.addWidget(self.plot_panel, 1)
         self.lower = QTabWidget(); self.lower.addTab(spec_box, "Spectrum"); self.lower.addTab(freq_box, "Frequencies"); self.lower.addTab(scrolled(self.structure), "Structure")     ## each gets the whole area
-        lay = QVBoxLayout(self); lay.setContentsMargins(0, 6, 0, 0); lay.addLayout(top); lay.addWidget(self.summary); lay.addWidget(self.lower, 1)
+        head = card(self.state_row(), self.summary)
+        lay = QVBoxLayout(self); lay.setContentsMargins(0, 10, 0, 0); lay.setSpacing(10); lay.addWidget(head); lay.addWidget(self.lower, 1)
         theme.on_change(self.fill_modes)
+
+    def state_row(self) -> QHBoxLayout:
+        row = hrow("State", self.chooser); row.addWidget(self.save_xyz_btn); return row
 
     def set_loaded(self, loaded: "results.Loaded | None") -> None:
         """New system (or the same one reloaded): keeps the state shown if it still exists, otherwise picks the first state with frequencies."""
@@ -138,11 +163,11 @@ class StatePanel(QWidget):
         try: self.detail = results.state_detail(loaded.system, source, state)
         except Exception as exc: self.detail = None; self.summary.setText(f"Cannot read this state: {type(exc).__name__}: {exc}"); return
         d = self.detail; c = theme.colors(); units = self.page.units.currentText()
-        energy = "no energy registered" if row.energy is None else f"<b>{row.energy:.8f} Eh</b>"
+        energy = "no energy registered" if row.energy is None else f"<span style='font-size:15px; font-weight:600'>{row.energy:.8f} Eh</span>"
         bits = [energy, row.method or "", f"{len(d.modes)} frequencies" if d.modes else "no frequencies",
                 ("<span style='color:%s'>%d imaginary</span>" % (c["err"], sum(m.freq < 0 for m in d.modes))) if any(m.freq < 0 for m in d.modes) else ("minimum" if d.modes else ""),
                 f"{d.n_excited} excited states" if d.n_excited else "", "from " + ", ".join(row.runs) if row.runs else ""]
-        self.summary.setText(" &nbsp;·&nbsp; ".join(b for b in bits if b))
+        sub = f"<span style='color:{c['sub']}'>"; self.summary.setText(bits[0] + " &nbsp; " + sub + " &nbsp;·&nbsp; ".join(b for b in bits[1:] if b) + "</span>")
         if d.structure: self.structure.set_structures([d.structure], "", f"{source} · {state}")
         else: self.structure.clear("This state has no geometry of its own.")
         self.save_xyz_btn.setEnabled(d.structure is not None)
@@ -246,7 +271,7 @@ class ThermoPanel(QWidget):
     the state, in a worker thread). Where ΔG changes sign is shown (T½ for the HS and LS states of a spin-crossover compound)."""
     def __init__(self, page: "ResultsTab"):
         super().__init__()
-        from scope.gui.plots import PlotCanvas
+        from scope.gui.plots import PlotCanvas, PlotPanel
         self.page, self.task, self.generation, self.result, self.keys = page, None, 0, None, []
         self.a, self.b = QComboBox(), QComboBox()
         for box in (self.a, self.b): box.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon); box.setMinimumContentsLength(20)
@@ -258,11 +283,15 @@ class ThermoPanel(QWidget):
         self.summary = QLabel(); self.summary.setWordWrap(True); self.summary.setTextFormat(Qt.RichText); self.summary.setTextInteractionFlags(Qt.TextSelectableByMouse); self.summary.setMinimumWidth(10)
         self.canvas = PlotCanvas()
         save, copy = QPushButton("Save plot…"), QPushButton("Copy data (CSV)"); save.clicked.connect(self.save_plot); copy.clicked.connect(self.copy_csv)
-        row1 = QHBoxLayout(); [row1.addWidget(w) for w in (QLabel("State"), self.a, QLabel("minus"), self.b)]; row1.addStretch(1)
-        row2 = QHBoxLayout(); [row2.addWidget(w) for w in (QLabel("T from"), self.t_from, QLabel("to"), self.t_to, QLabel("step"), self.t_step, QLabel("report at"), self.at)]; row2.addStretch(1)
-        row3 = QHBoxLayout(); [row3.addWidget(w) for w in (QLabel("Model"), self.model, self.cutoff, QLabel("Imaginary"), self.imag, QLabel("Units"), self.units)]; row3.addStretch(1)
-        row4 = QHBoxLayout(); row4.addStretch(1); row4.addWidget(copy); row4.addWidget(save)
-        lay = QVBoxLayout(self); lay.setContentsMargins(0, 6, 0, 0); [lay.addLayout(r) for r in (row1, row2, row3)]; lay.addWidget(self.summary); lay.addWidget(self.canvas, 1); lay.addLayout(row4)
+        self.plot_panel = PlotPanel(self.canvas, [copy, save])
+        grid = QGridLayout(); grid.setHorizontalSpacing(12); grid.setVerticalSpacing(8); grid.setColumnStretch(1, 1)
+        for r, (name, row) in enumerate((("States", hrow(self.a, "minus", self.b)),
+                                         ("Temperature", hrow("from", self.t_from, "to", self.t_to, "step", self.t_step, None, "report at", self.at)),
+                                         ("Model", hrow(self.model, self.cutoff, None, "Imaginary", self.imag, None, "Units", self.units)))):
+            grid.addWidget(caption(name), r, 0, Qt.AlignRight | Qt.AlignVCenter); grid.addLayout(row, r, 1)
+        self.summary.setContentsMargins(2, 0, 2, 0)
+        lay = QVBoxLayout(self); lay.setContentsMargins(0, 10, 0, 0); lay.setSpacing(10)
+        lay.addWidget(card(grid)); lay.addWidget(self.summary); lay.addWidget(self.plot_panel, 1)
         self.timer = QTimer(self); self.timer.setSingleShot(True); self.timer.setInterval(250); self.timer.timeout.connect(self.compute)
         for sig in (self.a.currentIndexChanged, self.b.currentIndexChanged, self.t_from.valueChanged, self.t_to.valueChanged, self.t_step.valueChanged, self.at.valueChanged,
                     self.model.currentIndexChanged, self.imag.currentIndexChanged, self.cutoff.valueChanged): sig.connect(self.timer.start)
@@ -368,27 +397,26 @@ class ComparePanel(QWidget):
     same formula and method, across systems. Other systems are loaded read-only in a worker thread and kept until their file changes."""
     def __init__(self, page: "ResultsTab"):
         super().__init__()
-        from scope.gui.plots import PlotCanvas
+        from scope.gui.plots import PlotCanvas, PlotPanel
         self.page, self.cache, self.rows, self.task, self.order, self.done_quantity, self.done_temp, self.provs, self.done_settings = page, {}, [], None, [], "energy", 298.15, [], {}
         self.list = QListWidget(); self.list.setFixedWidth(140); self.list.setToolTip("Systems to compare (tick them)")
         all_btn, this_btn = QPushButton("All"), QPushButton("Only this"); all_btn.clicked.connect(lambda: self.tick(True)); this_btn.clicked.connect(lambda: self.tick(False))
-        left = QVBoxLayout(); left.addWidget(QLabel("Systems")); left.addWidget(self.list, 1); lb = QHBoxLayout(); lb.addWidget(all_btn); lb.addWidget(this_btn); left.addLayout(lb)
+        self.list.setObjectName("navlist"); lb = QHBoxLayout(); lb.setSpacing(6); lb.addWidget(all_btn); lb.addWidget(this_btn)
+        left = card(self.list, lb, title="Systems"); left.setFixedWidth(150); self.list.setMinimumWidth(10); self.list.setFixedWidth(122)
         self.quantity = combo(["Electronic energy", "Gibbs energy G(T)"]); self.temp = spin(1, 5000, 298.15, 10, 2, " K")
         self.model, self.imag, self.units = combo(results.MODELS), combo(results.IMAGINARY, IMAG_TIP), combo(list(results.UNITS)[1:])
         self.go = QPushButton("Compare"); self.go.setProperty("primary", True); self.go.clicked.connect(self.run)
         copy, save = QPushButton("Copy table (CSV)"), QPushButton("Save plot…"); copy.clicked.connect(self.copy_csv); save.clicked.connect(self.save_plot)
-        row = QHBoxLayout(); [row.addWidget(w) for w in (QLabel("Compare"), self.quantity, self.temp, self.model, self.imag)]; row.addStretch(1)
-        row_b = QHBoxLayout(); [row_b.addWidget(w) for w in (QLabel("Units"), self.units)]; row_b.addStretch(1); row_b.addWidget(self.go)
+        row = hrow("Compare", self.quantity, self.temp, self.model, self.imag, None, "Units", self.units); row.addWidget(self.go)
         self.status = QLabel("Tick systems and press Compare. Δ is measured from the lowest value among states with the same formula and method."); self.status.setWordWrap(True); self.status.setObjectName("pagesub"); self.status.setMinimumWidth(10)
         self.table = QTableWidget(0, 8); self.table.setHorizontalHeaderLabels(["System", "Source", "State", "Formula", "Method", "Value (Eh)", "Δ", "Note"])
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers); self.table.setSelectionBehavior(QAbstractItemView.SelectRows); self.table.verticalHeader().setVisible(False)
         hh = self.table.horizontalHeader(); [hh.setSectionResizeMode(i, QHeaderView.ResizeToContents) for i in range(8)]; hh.setSectionResizeMode(7, QHeaderView.Stretch)
         self.table.itemSelectionChanged.connect(self.draw)
-        self.canvas = PlotCanvas()
-        split = QSplitter(Qt.Vertical); split.addWidget(self.table); split.addWidget(self.canvas); split.setStretchFactor(0, 1); split.setStretchFactor(1, 1)
-        actions = QHBoxLayout(); actions.addStretch(1); actions.addWidget(copy); actions.addWidget(save)
-        right = QVBoxLayout(); right.addLayout(row); right.addLayout(row_b); right.addWidget(self.status); right.addWidget(split, 1); right.addLayout(actions)
-        lay = QHBoxLayout(self); lay.setContentsMargins(0, 6, 0, 0); lay.addLayout(left); lay.addLayout(right, 1)
+        self.canvas = PlotCanvas(); self.plot_panel = PlotPanel(self.canvas, [copy, save])
+        split = QSplitter(Qt.Vertical); split.setHandleWidth(8); split.addWidget(self.table); split.addWidget(self.plot_panel); split.setStretchFactor(0, 1); split.setStretchFactor(1, 1)
+        right = QVBoxLayout(); right.setSpacing(10); right.addWidget(card(row, self.status)); right.addWidget(split, 1)
+        lay = QHBoxLayout(self); lay.setContentsMargins(0, 10, 0, 0); lay.setSpacing(10); lay.addWidget(left); lay.addLayout(right, 1)
         self.quantity.currentIndexChanged.connect(self.options_shown); self.units.currentIndexChanged.connect(self.fill); self.options_shown()
 
     def options_shown(self) -> None:
@@ -534,27 +562,32 @@ class ResultsTab(QWidget):
     def __init__(self, session, window=None):
         super().__init__()
         self.session, self.window_, self.loaded, self.shown_print, self.task, self.pending, self.viewers = session, window, None, (), None, None, []
-        self.systems = QListWidget(); self.systems.setFixedWidth(170); self.systems.currentTextChanged.connect(self.select)
-        self.prov    = QLabel(); self.prov.setWordWrap(True); self.prov.setTextFormat(Qt.RichText); self.prov.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        from scope.gui.plots import ElidedLabel
+        self.systems = QListWidget(); self.systems.setObjectName("navlist"); self.systems.currentTextChanged.connect(self.select)
+        self.title   = QLabel(); self.title.setObjectName("restitle")
+        self.prov    = QLabel(); self.prov.setWordWrap(True); self.prov.setTextFormat(Qt.RichText); self.prov.setTextInteractionFlags(Qt.TextSelectableByMouse); self.prov.setObjectName("pagesub"); self.prov.setMinimumWidth(10)
+        self.message = ElidedLabel()                                                                   ## one line for what an action just did (coloured by kind)
         self.banner  = QLabel(); self.banner.setWordWrap(True); self.banner.hide()
         self.issues  = QLabel(); self.issues.setWordWrap(True); self.issues.setTextFormat(Qt.RichText); self.issues.hide()
-        self.notes, self.notes_open = [], False
+        self.notes, self.notes_open, self.notes_warn = [], False, False
         self.issues.linkActivated.connect(lambda _: (setattr(self, "notes_open", not self.notes_open), self.render_notes()))
         ## Overview
         self.units = QComboBox(); self.units.addItems(list(results.UNITS)[1:]); self.units.currentTextChanged.connect(self.fill_overview)
-        self.table = QTableWidget(0, 9); self.table.setHorizontalHeaderLabels(["Source", "State", "Method", "Energy (Eh)", "ΔE", "Minimum", "Imag. freq.", "Runs", "Status"])
+        self.table = QTableWidget(0, 9); self.table.setHorizontalHeaderLabels(["Source", "State", "Method", "Energy (Eh)", "ΔE", "Min.", "Imag.", "Runs", "Status"])
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers); self.table.setSelectionBehavior(QAbstractItemView.SelectRows); self.table.verticalHeader().setVisible(False)
+        self.table.setTextElideMode(Qt.ElideRight); self.table.setWordWrap(False)
         hh = self.table.horizontalHeader(); [hh.setSectionResizeMode(i, QHeaderView.ResizeToContents) for i in range(9)]; hh.setSectionResizeMode(7, QHeaderView.Stretch)
-        de_note = QLabel("ΔE: against the lowest energy among states of the same formula and method (other energies are not comparable)."); de_note.setObjectName("pagesub"); de_note.setWordWrap(True)
-        urow = QHBoxLayout(); urow.addWidget(QLabel("ΔE in")); urow.addWidget(self.units); urow.addWidget(de_note, 1)
-        over = QWidget(); ol = QVBoxLayout(over); ol.setContentsMargins(0, 6, 0, 0); ol.addLayout(urow); ol.addWidget(self.table, 1)
+        hh.setSectionResizeMode(2, QHeaderView.Interactive); hh.resizeSection(2, 130); hh.setMinimumSectionSize(40)                      ## the method elides; Runs takes what is left
+        de_note = ElidedLabel("ΔE is measured within the same formula and method (other energies are not comparable)  ·  double-click a state to open it"); de_note.setObjectName("pagesub")
+        urow = hrow("ΔE in", self.units, stretch=False); urow.addSpacing(12); urow.addWidget(de_note, 1)
+        over = QWidget(); ol = QVBoxLayout(over); ol.setContentsMargins(10, 10, 10, 10); ol.setSpacing(8); ol.addLayout(urow); ol.addWidget(self.table, 1)
         ## Computations
         self.tree = QTreeWidget(); self.tree.setColumnCount(7); self.tree.setHeaderLabels(["Calculation", "Status", "Reads → writes", "Wall time", "CPU time", "Output", "Method"])
         self.tree.itemDoubleClicked.connect(self.open_item); self.tree.header().setSectionResizeMode(QHeaderView.ResizeToContents)
         open_log = QPushButton("Open output"); open_log.clicked.connect(lambda: self.open_item(self.tree.currentItem()))
-        tip = QLabel("Double-click a calculation to read its output. Runs r2, r3… continue a run that stopped or failed; s2, s3… are steps of a repeated job."); tip.setObjectName("pagesub"); tip.setWordWrap(True)
+        tip = ElidedLabel("Double-click a calculation to read its output  ·  r2, r3… continue a run that stopped or failed  ·  s2, s3… are steps of a repeated job"); tip.setObjectName("pagesub")
         crow = QHBoxLayout(); crow.addWidget(tip, 1); crow.addWidget(open_log)
-        comps = QWidget(); cl = QVBoxLayout(comps); cl.setContentsMargins(0, 6, 0, 0); cl.addLayout(crow); cl.addWidget(self.tree, 1)
+        comps = QWidget(); cl = QVBoxLayout(comps); cl.setContentsMargins(10, 10, 10, 10); cl.setSpacing(8); cl.addLayout(crow); cl.addWidget(self.tree, 1)
         self.state = StatePanel(self)
         self.thermo, self.compare = ThermoPanel(self), ComparePanel(self)
         self.tabs = QTabWidget(); self.tabs.addTab(over, "Overview"); self.tabs.addTab(comps, "Calculations"); self.tabs.addTab(scrolled(self.state), "State")
@@ -577,12 +610,16 @@ class ResultsTab(QWidget):
                                         [("Copy code (the notebook's first cell)", self.copy_code)], lambda: self.open_notebook())
         self.older_btn = QToolButton(); self.older_btn.setText("Older copies"); self.older_btn.setPopupMode(QToolButton.InstantPopup); self.older_menu = QMenu(self.older_btn); self.older_btn.setMenu(self.older_menu)
         self.older_btn.setToolTip("Copies of this system file kept by downloads (<system>.npy.bak-<time>): open one beside the current file")
-        actions = QHBoxLayout(); [actions.addWidget(b) for b in (self.reload_btn, self.folder_btn, self.export_btn, self.older_btn)]; actions.addStretch(1)
-        [actions.addWidget(b) for b in (self.notebook_btn, self.missing_btn)]
+        actions = QHBoxLayout(); actions.setSpacing(8); [actions.addWidget(b) for b in (self.reload_btn, self.folder_btn, self.export_btn, self.older_btn)]
+        actions.addStretch(1); [actions.addWidget(b) for b in (self.notebook_btn, self.missing_btn)]
+        self.message.hide()
         self.jupyter, self.jupyter_root, self.jupyter_pending, self.dialogs = None, "", [], []           ## the Jupyter Lab this window started, the folder it serves, notebooks to open once it is up
         self.jupyter_timer = QTimer(self); self.jupyter_timer.setInterval(1000); self.jupyter_timer.timeout.connect(self.poll_jupyter); self.jupyter_waited = 0
-        right = QWidget(); rl = QVBoxLayout(right); rl.setContentsMargins(0, 0, 0, 0); rl.addWidget(self.prov); rl.addWidget(self.banner); rl.addWidget(self.issues); rl.addWidget(self.tabs, 1); rl.addLayout(actions)
-        lay = QHBoxLayout(self); lay.setContentsMargins(0, 0, 0, 0); lay.addWidget(self.systems); lay.addWidget(right, 1)
+        head = QVBoxLayout(); head.setSpacing(2); head.setContentsMargins(2, 0, 2, 0); head.addWidget(self.title); head.addWidget(self.prov); head.addWidget(self.issues)
+        right = QWidget(); rl = QVBoxLayout(right); rl.setContentsMargins(0, 0, 0, 0); rl.setSpacing(10)
+        rl.addLayout(head); rl.addWidget(self.banner); rl.addWidget(self.tabs, 1); rl.addLayout(actions); rl.addWidget(self.message)
+        side = card(self.systems, title="Systems"); side.setFixedWidth(140)
+        lay = QHBoxLayout(self); lay.setContentsMargins(0, 0, 0, 0); lay.setSpacing(14); lay.addWidget(side); lay.addWidget(right, 1)
         self.timer = QTimer(self); self.timer.setInterval(2500); self.timer.timeout.connect(self.watch)
         session.systemsChanged.connect(self.refresh_systems); session.envChanged.connect(self.refresh_systems)
         theme.on_change(self.redraw)
@@ -607,7 +644,7 @@ class ResultsTab(QWidget):
 
     def clear(self, message: str) -> None:
         self.loaded, self.shown_print = None, ()
-        self.prov.setText(message); self.banner.hide(); self.issues.hide(); self.table.setRowCount(0); self.tree.clear(); self.state.set_loaded(None); self.thermo.set_loaded(None)
+        self.title.setText(self.current() or "Results"); self.prov.setText(message); self.banner.hide(); self.issues.hide(); self.table.setRowCount(0); self.tree.clear(); self.state.set_loaded(None); self.thermo.set_loaded(None)
         for b in (self.reload_btn, self.folder_btn, self.missing_btn, self.notebook_btn, self.export_btn, self.older_btn): b.setEnabled(False)
 
     ##### loading (worker thread) #####
@@ -617,7 +654,7 @@ class ResultsTab(QWidget):
         if self.task is not None: self.pending = name; return                          ## one load at a time; the latest wish wins
         if not force and self.loaded and self.loaded.provenance.system == name and results.fingerprint(self.loaded.provenance.file) == self.shown_print: return
         env_path = self.session.info.filepath
-        self.prov.setText(f"Reading <b>{name}</b>…"); self.task = Task(lambda: results.load(env_path, name))
+        self.title.setText(name); self.prov.setText("Reading the system file…"); self.task = Task(lambda: results.load(env_path, name))
         self.task.signals.done.connect(self.loaded_ok); self.task.signals.failed.connect(lambda m, n=name: self.loaded_failed(n, m))
         QThreadPool.globalInstance().start(self.task)
 
@@ -646,23 +683,32 @@ class ResultsTab(QWidget):
         p, s = self.loaded.provenance, self.loaded.summary; c = theme.colors()
         when = time.strftime("%d %b %Y %H:%M", time.localtime(p.mtime))
         done, total = s.counts()
-        lines = [f"<b>{p.system}</b> &nbsp;·&nbsp; {done} of {total} sources with results &nbsp;·&nbsp; system file <code>{p.file}</code> &nbsp;·&nbsp; {when} &nbsp;·&nbsp; {p.size / 1e6:.2f} MB",
-                 f"<span style='color:{c['sub']}'>Saved by SCOPE {p.saved_version or '?'}, read with SCOPE {p.local_version or '?'} &nbsp;·&nbsp; folders of environment <code>{os.path.basename(p.env_file)}</code></span>"]
-        self.prov.setText("<br>".join(lines))
+        self.title.setText(p.label)
+        version = f"SCOPE {p.saved_version or '?'}" + (f" → {p.local_version}" if p.version_differs else "")
+        facts = [f"<span style='color:{c['text']}'>{done} of {total} sources with results</span>", self.short_path(p.file), when, f"{p.size / 1e6:.1f} MB", version]
+        self.prov.setText(" &nbsp;·&nbsp; ".join(facts)); self.prov.setToolTip(f"System file: {p.file}\nEnvironment: {p.env_file}\nSaved by SCOPE {p.saved_version or '?'}, read with SCOPE {p.local_version or '?'}")
         notes, copies = [], f"{len(p.backups)} older cop{'y' if len(p.backups) == 1 else 'ies'}"                ## (short label, full text)
-        if p.moved: notes.append(("written on another computer", f"The file was written where SCOPE ran (<code>{p.stored_root}</code>); its paths are pointed at this computer's folders for reading. Nothing is changed on disk."))
+        if p.moved: notes.append(("from another computer", f"The file was written where SCOPE ran (<code>{p.stored_root}</code>); its paths are pointed at this computer's folders for reading. Nothing is changed on disk."))
         if p.version_differs: notes.append((f"saved by SCOPE {p.saved_version}", f"Saved by SCOPE {p.saved_version}, read by {p.local_version}: values are read as stored, but objects from very different versions may miss newer fields."))
-        if s.missing_outputs: notes.append((f"{len(s.missing_outputs)} output file(s) not here", f"{len(s.missing_outputs)} output file(s) are not on this computer (still running, not downloaded, or not started). Energies and frequencies are in the system file; reading an output needs it here. Use <i>Download missing outputs…</i>."))
+        if s.missing_outputs: notes.append((f"{len(s.missing_outputs)} outputs not here", f"{len(s.missing_outputs)} output file(s) are not on this computer (still running, not downloaded, or not started). Energies and frequencies are in the system file; reading an output needs it here. Use <i>Download missing outputs…</i>."))
         if p.rdkit_note: notes.append(("newer RDKit", p.rdkit_note + " Usually harmless: energies and frequencies are SCOPE's own numbers."))
         if p.backups: notes.append((copies, f"{copies} of this system file kept by downloads (newest: {os.path.basename(p.backups[0])})."))
-        self.notes = notes; theme.set_kind(self.issues, "warn" if s.missing_outputs or p.version_differs else ""); self.render_notes()
+        self.notes, self.notes_warn = notes, bool(s.missing_outputs or p.version_differs); theme.set_kind(self.issues, ""); self.render_notes()
+
+    def short_path(self, path: str) -> str:
+        """`path` relative to the project folder when it is inside it (Systems/water/water.npy), otherwise as it is."""
+        try:
+            root = notebooks.project_folder(self.session.info); rel = os.path.relpath(path, root)
+            return path if rel.startswith("..") else rel
+        except Exception: return path
 
     def render_notes(self) -> None:
         """The notes about the file shown, folded to one line by default (they matter, but should not push the results off the screen)."""
         n = len(self.notes); self.issues.setVisible(bool(n))
         if not n: return
-        if self.notes_open: self.issues.setText("<br>".join("• " + full for _, full in self.notes) + " &nbsp;<a href='fold'>hide</a>")
-        else: self.issues.setText(f"• {n} note{'s' if n > 1 else ''} about this file: " + ", ".join(short for short, _ in self.notes) + ". &nbsp;<a href='open'>show</a>")
+        colour = theme.colors()["warn" if self.notes_warn else "sub"]
+        if self.notes_open: self.issues.setText(f"<span style='color:{colour}'>" + "<br>".join("• " + full for _, full in self.notes) + "</span> &nbsp;<a href='fold'>hide</a>")
+        else: self.issues.setText(f"<span style='color:{colour}'>⚑ " + " · ".join(short for short, _ in self.notes) + "</span> &nbsp;<a href='open'>details</a>")
 
     def watch(self) -> None:
         """Runs every few seconds while the page has a system: reloads when the file changed, and says when a run of it is going on."""
@@ -695,7 +741,7 @@ class ResultsTab(QWidget):
                      item("" if de is None else f"{de * factor:.2f}", f"ΔE in {units}", "", True),
                      item(minimum, "From the frequencies: no imaginary frequency" if r.minimum else ("Has imaginary frequencies" if r.minimum is False else "No frequencies computed"), theme.colors()["err"] if r.minimum is False else ""),
                      item(str(r.n_imag) if r.n_freqs else "", f"{r.n_freqs} frequencies", theme.colors()["err"] if r.n_imag else "", True),
-                     item(", ".join(r.runs), "Calculations that wrote this state, in order. The values come from the last one."), item(f"{GROUP_WORD.get(r.group, '?')} {status}", "", colour)]
+                     item(", ".join(r.runs), (", ".join(r.runs) + "\n" if r.runs else "") + "Calculations that wrote this state, in order. The values come from the last one."), item(f"{GROUP_WORD.get(r.group, '?')} {status}", "", colour)]
             for j, cell in enumerate(cells): self.table.setItem(i, j, cell)
         self.table.horizontalHeaderItem(4).setText(f"ΔE ({units})")
 
@@ -721,7 +767,7 @@ class ResultsTab(QWidget):
     def open_item(self, it: "QTreeWidgetItem | None", _column: int=0) -> None:
         path = it.data(0, Qt.UserRole) if it is not None else None
         if not path: return
-        if not os.path.isfile(path): self.issues.setText(f"The output is not on this computer: {path}. Use <i>Download missing outputs…</i>."); theme.set_kind(self.issues, "warn"); self.issues.show(); return
+        if not os.path.isfile(path): self.say(f"The output is not on this computer: {path}. Use Download missing outputs…", "warn"); return
         viewer = LogViewer(self, path, f"{it.text(0)} · {os.path.basename(path)}"); self.viewers = [v for v in self.viewers if v.isVisible()] + [viewer]; viewer.show()
 
     def open_state(self, row: int, _column: int=0) -> None:
@@ -775,7 +821,10 @@ class ResultsTab(QWidget):
         self.say(f"Saved {path}.", "")
 
     def say(self, html: str, kind: str) -> None:
-        self.issues.setText(html); theme.set_kind(self.issues, kind); self.issues.show()
+        """What an action just did, on one line of the action bar (cut to the room it has; the whole text is its tooltip)."""
+        import re
+        text = re.sub(r"<[^>]+>", "", html).replace("&nbsp;", " ")
+        self.message.set_full(text); theme.set_kind(self.message, kind); self.message.setVisible(bool(text))
 
     ##### notebooks #####
     def copy_code(self) -> None:
