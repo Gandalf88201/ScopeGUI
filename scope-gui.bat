@@ -109,6 +109,8 @@ echo scope-gui: installing cell2mol (needs git and internet).
 "%VPY%" -m pip install --disable-pip-version-check "%C2M%"
 if errorlevel 1 echo scope-gui: WARNING: cell2mol could not be installed (is git installed?). The GUI opens anyway; install git and run scope-gui.bat --reinstall to retry. 1>&2
 :c2mdone
+rem SCOPE's add-ons in this checkout: a system saved with one of them needs it to open (Results page).
+for %%A in (sco azo) do if exist "%ROOT%\%%A\pyproject.toml" "%VPY%" -m pip install --disable-pip-version-check --no-deps -e "%ROOT%\%%A" || echo scope-gui: WARNING: the SCOPE add-on %%A could not be installed. Systems saved with it cannot be opened in the window; run scope-gui.bat --reinstall to retry. 1>&2
 >"%STAMP%" echo !FP!
 
 :launch
@@ -122,7 +124,7 @@ exit /b %errorlevel%
 :fingerprint
 set "FP="
 for /f "skip=1 tokens=*" %%H in ('certutil -hashfile "%CORE%\pyproject.toml" MD5') do if not defined FP set "FP=%%H"
-set "FP=!FP: =!-c2m!C2MID:~0,7!"
+set "FP=!FP: =!-c2m!C2MID:~0,7!-addons1"
 exit /b 0
 
 :nocore

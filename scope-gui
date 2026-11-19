@@ -57,7 +57,7 @@ find_python() {
 # cell2mol is not on PyPI: SCOPE's README installs it from this commit (keep both in sync). It is part of the
 # fingerprint, so environments made before it was added get it on their next start.
 CELL2MOL="cell2mol @ git+https://github.com/lcmd-epfl/cell2mol.git@55649ba5f444895846a5d049adcb056c01bb0421"
-fingerprint() { local c="${CELL2MOL##*@}"; echo "$(cksum < "$core/pyproject.toml" | awk '{print $1 "-" $2}')-c2m${c:0:7}"; }
+fingerprint() { local c="${CELL2MOL##*@}"; echo "$(cksum < "$core/pyproject.toml" | awk '{print $1 "-" $2}')-c2m${c:0:7}-addons1"; }    # -addons1: environments made before the add-ons were installed get them once
 
 if [ -x "$venv/bin/python" ] && ! is_312 "$venv/bin/python"; then
     echo "scope-gui: the private environment in $venv is not Python 3.12 (was Python replaced?). Delete that folder and run ./scope-gui again." >&2; exit 1
@@ -96,6 +96,11 @@ if [ "$reinstall" = 1 ]; then
         "$venv/bin/python" -m pip install --disable-pip-version-check "$CELL2MOL" || {
             echo "scope-gui: WARNING: cell2mol could not be installed (is git installed?). The GUI opens anyway; install git and run ./scope-gui --reinstall to retry." >&2; }
     fi
+    for addon in sco azo; do                                     # SCOPE's add-ons in this checkout: a system saved with one of them needs it to open (Results page)
+        [ -f "$root/$addon/pyproject.toml" ] || continue
+        "$venv/bin/python" -m pip install --disable-pip-version-check --no-deps -e "$root/$addon" || \
+            echo "scope-gui: WARNING: the SCOPE add-on '$addon' could not be installed. Systems saved with it cannot be opened in the window; run ./scope-gui --reinstall to retry." >&2
+    done
     fingerprint > "$stamp"
 fi
 

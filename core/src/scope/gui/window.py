@@ -1,4 +1,4 @@
-"""Qt window of the SCOPE GUI: a left bar of five steps (Environment, Systems, Pipeline, Run, Cluster) plus a manual.
+"""Qt window of the SCOPE GUI: a left bar of six steps (Environment, Systems, Pipeline, Run, Cluster, Results) plus a manual.
 
 Requires PySide6. Heavy work is never done in the window thread. `scope run` is started detached (its own session, no pipe to the
 window, output in a log file), so closing or crashing the window does not stop it; the window follows the log and finds a run again when reopened.
@@ -404,7 +404,8 @@ class RunTab(QWidget):
 ### Main window ###
 ###################
 STEPS = [("environment", "Environment", "Say where your files live", "1 ·"), ("systems", "Systems", "Bring in the molecules to compute", "2 ·"), ("pipeline", "Pipeline", "Describe what to compute, and in what order", "3 ·"),
-         ("run", "Run", "Let SCOPE act on the pipeline", "4 ·"), ("cluster", "Cluster", "Run on a remote cluster instead of this computer", "5 ·")]
+         ("run", "Run", "Let SCOPE act on the pipeline", "4 ·"), ("cluster", "Cluster", "Run on a remote cluster instead of this computer", "5 ·"),
+         ("results", "Results", "See what SCOPE computed and registered (read-only)", "6 ·")]
 
 class Page(QWidget):
     """One step: title, one-line purpose, a link to its manual section, the content, and Back / Next buttons."""
@@ -454,7 +455,7 @@ class LocalScopeDialog(QDialog):
         self.text.setPlainText("\n".join(lines))
 
 class MainWindow(QMainWindow):
-    """Left bar with the five steps, a manual and a theme switch; the selected step fills the rest of the window."""
+    """Left bar with the six steps, a manual and a theme switch; the selected step fills the rest of the window."""
     localChecked   = Signal()
     updatesChecked = Signal()
 
@@ -470,7 +471,9 @@ class MainWindow(QMainWindow):
         from scope.gui.manual import ManualPage
         self.remote_tab, self.manual = RemoteTab(self.session), ManualPage()
         scroll = QScrollArea(); scroll.setWidgetResizable(True); scroll.setFrameShape(QFrame.NoFrame); scroll.setWidget(self.remote_tab)       ## the Cluster page is tall: scroll instead of squeezing
-        bodies  = [self.env_tab, self.sys_tab, self.pipe_tab, self.run_tab, scroll]
+        from scope.gui.results_page import ResultsTab
+        self.results_tab = ResultsTab(self.session, self)
+        bodies  = [self.env_tab, self.sys_tab, self.pipe_tab, self.run_tab, scroll, self.results_tab]
         self.tabs = QStackedWidget()                                  ## kept under this name: it used to be a QTabWidget
         self.pages = [Page(i + 1, key, title, sub, body, self) for i, ((key, title, sub, _), body) in enumerate(zip(STEPS, bodies))]
         for page in self.pages: self.tabs.addWidget(page)
@@ -626,6 +629,7 @@ class MainWindow(QMainWindow):
         if key == "pipeline":    return any(r.ok for r in s.reports)
         if key == "run":         return s.progress["ran"]
         if key == "cluster":     return s.progress["cluster"]
+        if key == "results":     return self.results_tab.loaded is not None
         return False
 
     def update_steps(self) -> None:
@@ -776,6 +780,7 @@ class MainWindow(QMainWindow):
             choice = self.close_choice()
             if choice == "stop": self.run_tab.stop()
             elif choice != "keep": event.ignore(); return
+        if not self.results_tab.close_jupyter(): event.ignore(); return                  ## the Jupyter Lab started from the Results page: stop it, or keep it
         self.save_workspace(); self.run_tab.timer.stop(); self.remote_tab.stop_watching()
         event.accept()
 

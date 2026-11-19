@@ -11,6 +11,7 @@ case "$*" in
   *version_info*) exit 0 ;;                                  # "is this a Python 3.12?"
   *"import cell2mol"*) exit ${C2M_PRESENT_EXIT:-0} ;;        # "is cell2mol installed?" (default: yes)
   "-m pip install"*"cell2mol @"*) echo "PIP $*" >> "$LOG"; exit ${C2M_EXIT:-0} ;;
+  "-m pip install"*"--no-deps"*) echo "PIP $*" >> "$LOG"; exit ${ADDON_EXIT:-0} ;;   # an add-on of the checkout (sco, azo)
   "-m pip"*)      echo "PIP $*" >> "$LOG"; exit ${PIP_EXIT:-0} ;;
   *)              echo "LAUNCH $*" >> "$LOG"; exit 0 ;;
 esac
@@ -32,7 +33,7 @@ def run(root, home, *args, log, **env):
 C2M_COMMIT = "55649ba"                                                                         # first 7 characters of the commit pinned in SCOPE's README
 
 def stamp(root) -> str:
-    return subprocess.run("cksum < core/pyproject.toml | awk '{print $1 \"-\" $2}'", shell=True, cwd=root, capture_output=True, text=True).stdout.strip() + "-c2m" + C2M_COMMIT
+    return subprocess.run("cksum < core/pyproject.toml | awk '{print $1 \"-\" $2}'", shell=True, cwd=root, capture_output=True, text=True).stdout.strip() + "-c2m" + C2M_COMMIT + "-addons1"
 
 def test_an_up_to_date_environment_is_reused_and_arguments_are_passed_on(repo, tmp_path):
     root, home = repo; log = tmp_path / "log"
@@ -111,3 +112,19 @@ def test_an_environment_made_before_cell2mol_was_added_gets_it_on_the_next_start
     (home / "installed.stamp").write_text(old + "\n")
     done = run(root, home, log=log, C2M_PRESENT_EXIT="1")
     assert "recipe changed" in done.stdout and any("cell2mol @" in l for l in log.read_text().splitlines())
+
+def test_the_addons_of_the_checkout_are_installed_without_touching_scope(repo, tmp_path):
+    root, home = repo; log = tmp_path / "log"
+    for addon in ("sco", "azo"): (root / addon).mkdir(); (root / addon / "pyproject.toml").write_text(f"[project]\nname='scope-{addon}'\n")
+    (home / "installed.stamp").write_text("0-0\n")
+    assert run(root, home, "--check", log=log).returncode == 0
+    pips = [l for l in log.read_text().splitlines() if l.startswith("PIP")]
+    for addon in ("sco", "azo"): assert any("--no-deps" in l and str(root / addon) in l for l in pips), addon       # --no-deps: the add-ons never reinstall scope-qc from PyPI
+    assert (home / "installed.stamp").read_text().strip() == stamp(root)
+
+def test_a_failed_addon_install_warns_and_still_opens_the_window(repo, tmp_path):
+    root, home = repo; log = tmp_path / "log"
+    (root / "sco").mkdir(); (root / "sco" / "pyproject.toml").write_text("[project]\nname='scope-sco'\n")
+    (home / "installed.stamp").write_text(stamp(root) + "\n")
+    done = run(root, home, "--reinstall", "--check", log=log, ADDON_EXIT="1")
+    assert done.returncode == 0 and "add-on 'sco' could not be installed" in done.stderr and "LAUNCH" in log.read_text()

@@ -89,21 +89,34 @@ def structures_of(system_file: str) -> list:
     from scope.read_write import load_binary
     system = load_binary(system_file)
     if getattr(system, "object_type", None) != "system": return []
+    return structures_from(system)
+
+def structures_from(system: object) -> list:
+    """structures_of for a system already loaded (the Results page has it in memory). Nothing in the system is changed."""
     out = []
     for source in getattr(system, "sources", []):
         labels, coords = list(getattr(source, "labels", [])), [list(map(float, c)) for c in getattr(source, "coord", [])]
         if not labels or len(labels) != len(coords): continue
-        bonds = bonds_from_matrix(getattr(source, "adjmat", None), len(labels)) or perceive_bonds(labels, coords)
-        name = getattr(source, "name", "") or getattr(source, "formula", "source")
-        charge, spin = getattr(source, "charge", None), getattr(source, "spin", None)
         states = [s for s in getattr(source, "states", []) if getattr(s, "coord", None) is not None and len(getattr(s, "coord", [])) == len(labels)]
-        if not states: out.append(Structure(f"{name}", labels, coords, bonds, charge, spin)); continue
-        for st in states:
-            st_labels = list(getattr(st, "labels", labels)) or labels
-            st_coords = [list(map(float, c)) for c in st.coord]
-            st_bonds = bonds if st_labels == labels else perceive_bonds(st_labels, st_coords)
-            out.append(Structure(f"{name} · {getattr(st, 'name', 'state')}", st_labels, st_coords, st_bonds, charge, spin))
+        if not states: out.append(state_structure(source, None)); continue
+        out += [state_structure(source, st) for st in states]
     return out
+
+def state_structure(source: object, st: "object | None") -> "Structure | None":
+    """The geometry of one state of a source (or of the source itself when `st` is None). A state with the same atoms keeps the source's
+    bonds (SCOPE's connectivity); otherwise bonds are guessed from distances. None if the state has no usable coordinates."""
+    labels, coords = list(getattr(source, "labels", [])), [list(map(float, c)) for c in getattr(source, "coord", [])]
+    name = getattr(source, "name", "") or getattr(source, "formula", "source")
+    charge, spin = getattr(source, "charge", None), getattr(source, "spin", None)
+    if not labels or len(labels) != len(coords): return None
+    bonds = bonds_from_matrix(getattr(source, "adjmat", None), len(labels)) or perceive_bonds(labels, coords)
+    if st is None: return Structure(f"{name}", labels, coords, bonds, charge, spin)
+    if getattr(st, "coord", None) is None or len(st.coord) == 0: return None
+    st_labels = list(getattr(st, "labels", labels)) or labels
+    st_coords = [list(map(float, c)) for c in st.coord]
+    if len(st_labels) != len(st_coords): return None
+    st_bonds = bonds if st_labels == labels else perceive_bonds(st_labels, st_coords)
+    return Structure(f"{name} · {getattr(st, 'name', 'state')}", st_labels, st_coords, st_bonds, charge, spin)
 
 def structures_for(row, sources_path: str="") -> list:
     """The structures to show for a row of the Systems page: from its system file, or, failing that, from <Sources>/<system>/<system>.xyz."""

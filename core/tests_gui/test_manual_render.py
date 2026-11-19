@@ -53,7 +53,7 @@ def test_manual_text_renders_without_leftover_markdown():
 def test_structure_groups_and_titles():
     from scope.gui import manual
     groups = [g for g, _, _ in manual.load_structure()]
-    assert groups[0] == "Getting started" and "The five steps" in groups and groups[-1] == "Reference"
+    assert groups[0] == "Getting started" and "The six steps" in groups and groups[-1] == "Reference"
     assert [t for t, _ in manual.load_sections()][:2] == ["Welcome", "Install and start"]
 
 def qapp():
@@ -66,11 +66,11 @@ def test_page_groups_captions_previous_next_and_search():
     qapp(); from scope.gui import manual
     page = manual.ManualPage()
     captions = [page.list.item(r).text() for r in page.heads]
-    assert captions == ["GETTING STARTED", "THE FIVE STEPS", "REFERENCE"]
+    assert captions == ["GETTING STARTED", "THE SIX STEPS", "REFERENCE"]
     assert not page.list.item(next(iter(page.heads))).flags() & page.list.item(1).flags().__class__.ItemIsSelectable            # captions cannot be selected
     assert page.show_section("Welcome") and not page.prev_btn.isVisibleTo(page) and "Install and start" in page.next_btn.text()
     page.next_btn.click(); assert "Install and start" in page.view.toPlainText()[:30] and "Welcome" in page.prev_btn.text()
-    assert page.show_section("5 ·") and "Local vs cluster" in page.next_btn.text() and "4 · Run" in page.prev_btn.text()
+    assert page.show_section("6 ·") and "Local vs cluster" in page.next_btn.text() and "5 · Cluster" in page.prev_btn.text()
     page.search.setText("TMPDIR")
     shown = [page.sections[i][0] for i in page.visible_sections()]
     assert shown and all("TMPDIR" in (t + dict(page.sections)[t]) for t in shown)

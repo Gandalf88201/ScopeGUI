@@ -17,9 +17,10 @@ class DownloadDialog(QDialog):
     """
     downloaded = Signal()
 
-    def __init__(self, parent, profile: "remote.Profile", info, system: str):
+    def __init__(self, parent, profile: "remote.Profile", info, system: str, wanted: list=None):
         super().__init__(parent)
         self.p, self.info, self.system, self.files, self.listing, self.tasks, self.busy = profile, info, system, [], {}, [], False
+        self.wanted = set(wanted or [])                                     ## files to tick (outputs the Results page misses), instead of the usual proposal
         self.setWindowTitle(f"Download results of '{system}'"); self.resize(980, 640)
         src  = f"{profile.host}:{profile.remote_root.rstrip('/')}/Computations/{system}/"; dst = os.path.join(info.computations_path, system) + "/"
         head = QLabel(f"From  <b>{src}</b><br>to  <b>{dst}</b>  (this workspace's folder)"); head.setTextFormat(Qt.RichText); head.setWordWrap(True)
@@ -68,6 +69,10 @@ class DownloadDialog(QDialog):
         self.with_system.setEnabled(bool(remote_npy))
         self.with_system.setChecked(bool(remote_npy) and (not os.path.isfile(local_npy) or remote_npy[1] > os.path.getmtime(local_npy) + 2))      ## proposed when the cluster's is newer
         if self.listing.get("truncated"): self.log.appendPlainText(f"Only the first {transfer.MAX_LIST} files are listed.")
+        if self.wanted:
+            for f in self.files: f.selected = f.rel in self.wanted
+            found = sum(1 for f in self.files if f.rel in self.wanted)
+            self.log.appendPlainText(f"Ticked the {found} output(s) missing on this computer that exist on the cluster" + (f"; {len(self.wanted) - found} are not on the cluster either (still running, or not started)." if found < len(self.wanted) else "."))
         self.fill()
 
     def fill(self) -> None:

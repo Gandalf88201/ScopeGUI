@@ -143,7 +143,7 @@ class RemoteTab(QWidget):
         self.terminal_btn.clicked.connect(self.show_terminal_command); self.test_btn.clicked.connect(self.test_connection)
         self.pre_up.clicked.connect(lambda: self.upload(preview=True)); self.up.clicked.connect(lambda: self.upload(preview=False)); self.run_btn.clicked.connect(self.run_remote)
         self.watch_btn.clicked.connect(self.watch_runs); self.unwatch_btn.clicked.connect(self.stop_watching); self.stopcl_btn.clicked.connect(self.stop_cluster_run)
-        self.down.clicked.connect(self.open_download)
+        self.down.clicked.connect(lambda: self.open_download())
         session.systemsChanged.connect(self.refresh_systems); session.envChanged.connect(self.refresh_systems); theme.on_change(self.render_checks); theme.on_change(self.render_lights)
         self.reload_chooser(); self.refresh_systems(); self.update_hint(); self.render_lights(); self.update_connection_buttons()
 
@@ -395,13 +395,15 @@ class RemoteTab(QWidget):
             self.background(lambda: remote.sync(items, dry_run=False, p=p), lambda r: (self.show_sync(r, "Copied"), self.status.setText("Upload finished.")), "Uploading…")
         self.background(work, done, "Checking what would be copied…")
 
-    def open_download(self) -> "object | None":
-        """Opens the download dialog for the selected system: list, choose, copy into this workspace's folders (or copy the command line)."""
+    def open_download(self, system: str=None, wanted: list=None) -> "object | None":
+        """Opens the download dialog for the selected system: list, choose, copy into this workspace's folders (or copy the command line).
+        `system` selects that system first; `wanted` (paths inside Computations/<system>/) are ticked instead of the usual proposal (Results page)."""
+        if system: self.system.setCurrentText(system)
         got = self.need()
         if not got: return None
         from scope.gui.download_dialog import DownloadDialog
         p, info, system = got
-        self.download_dialog = DownloadDialog(self, p, info, system); self.download_dialog.downloaded.connect(self.session.systemsChanged.emit)
+        self.download_dialog = DownloadDialog(self, p, info, system, wanted=wanted); self.download_dialog.downloaded.connect(self.session.systemsChanged.emit)
         self.download_dialog.setWindowModality(Qt.WindowModal); self.download_dialog.show()
         return self.download_dialog
 

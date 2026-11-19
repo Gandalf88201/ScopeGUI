@@ -2,7 +2,7 @@
 
 ## Welcome
 
-SCOPE prepares, submits and tracks quantum-chemistry calculations (Gaussian 16 and Quantum ESPRESSO) for molecules and molecular crystals. This window guides you through the work in five steps.
+SCOPE prepares, submits and tracks quantum-chemistry calculations (Gaussian 16 and Quantum ESPRESSO) for molecules and molecular crystals. This window guides you through the work in six steps.
 
 | Step | What you do | What SCOPE needs |
 |---|---|---|
@@ -11,6 +11,7 @@ SCOPE prepares, submits and tracks quantum-chemistry calculations (Gaussian 16 a
 | 3 Pipeline | Describe what to compute, and in what order | Input files (`.scope`) |
 | 4 Run | Let SCOPE act on the pipeline | An environment, a system and input files |
 | 5 Cluster | Run on a remote cluster instead of this computer | An SSH connection |
+| 6 Results | See what SCOPE computed and registered | A system file with results |
 
 Go through the steps in order with the **Next** button, or jump to any step in the left bar. A green dot next to a step means it is done. Steps are never locked: the dots only show what is still missing.
 
@@ -35,7 +36,7 @@ On the first start the launcher:
 
 1. finds a Python 3.12 (SCOPE does not support other versions) and tells you how to install one if it is missing;
 2. creates a private virtual environment in the SCOPE data folder, outside the repository;
-3. installs SCOPE, this interface and `cell2mol` in it (internet and `git` are needed, and it takes a few minutes);
+3. installs SCOPE, this interface and `cell2mol` in it (internet and `git` are needed, and it takes a few minutes), and SCOPE's add-ons `scope-sco` and `scope-azo` from the same checkout, so that systems saved with them can be opened;
 4. opens the window.
 
 Later starts take a few seconds. The launcher reinstalls by itself after a `git pull` that changes `core/pyproject.toml`.
@@ -155,7 +156,7 @@ SCOPE organises work in a fixed hierarchy: **System → Branch → Workflow → 
 
 SCOPE is **incremental**. Each time you press **Run** it looks at what exists, submits what is ready, skips what is running, registers what has finished, and saves. Run it again and again until everything is done.
 
-# The five steps
+# The six steps
 
 ## 1 · Environment
 
@@ -384,6 +385,109 @@ What makes it safe:
 
 > **Tip.** For very large transfers, **Copy command line** puts the equivalent `rsync` command on the clipboard. Paste it in a Terminal (inside `screen` or `tmux` if you like); it reads the ticked names from a list file and can be run again to resume. The system file is not part of it: replace that from the window, which keeps a backup.
 
+## 6 · Results
+
+This page shows what SCOPE computed and registered for the systems of the workspace: energies, minima, and every calculation with its status and its output file. It only reads: it never saves a system file and never creates a folder, so looking at results cannot change your project.
+
+Choose a system on the left. The page reads its system file (`Systems/<system>/<system>.npy`) in the background and shows:
+
+| Part | What it shows |
+|---|---|
+| Top line | The system file, its date and size, the SCOPE version that saved it and the one reading it, and the environment whose folders are used |
+| Notes | Anything to know before trusting the numbers (see below) |
+| **Overview** | One row per state of each source: energy (Hartree), ΔE, whether it is a minimum, imaginary frequencies, the calculations that wrote it, and the status of the last one |
+| **Calculations** | Every calculation, by branch and workflow: status, what it read and wrote, wall and CPU time, and whether its output is on this computer. Double-click one to read its output |
+| **State** | One state in detail: its spectrum, its frequencies and its structure. Double-click a row of the Overview to open it here |
+| **Thermochemistry** | G(T) of a state, or ΔG(T), ΔH and −TΔS between two states, and the temperature where ΔG changes sign |
+| **Compare** | The states of several systems of the workspace side by side, by electronic energy or by G(T) |
+
+**Where the files are.** The system file stores the folders where SCOPE ran, for instance on the cluster. The page points them at this workspace's folders (*Sources*, *Systems*, *Computations* of the environment) while it reads, without changing the file. A note says so when the file came from another computer or folder. The same is done by the notebook entry point, so a notebook and this page always show the same data:
+
+```
+from scope.gui.results import open_system
+system, prov = open_system("/path/to/scope_env_<name>.npy", "water")
+```
+
+**Notes you may see.**
+
+| Note | Meaning |
+|---|---|
+| *N output file(s) are not on this computer* | SCOPE registered (or expects) these outputs, but they are not here: still running, not downloaded, or not started. Energies and frequencies are in the system file and are shown anyway; reading an output needs the file. **Download missing outputs…** opens the download of the Cluster page with exactly those files ticked |
+| *Saved by SCOPE x, read by y* | The file comes from another SCOPE version. Values are read as stored |
+| *Older copies kept by downloads* | Each download that replaced the system file kept the previous one as `<system>.npy.bak-<date>`. **Older copies** opens one beside the current file (see below) |
+| *A run of … is going on* | A run of this system is active; the page reloads when it saves the system file |
+
+The page reloads by itself whenever the system file changes, for instance at the end of a run or a download. **Reload** reads it again at once.
+
+**Status of a calculation.**
+
+| Shown | SCOPE's status | Meaning |
+|---|---|---|
+| ✓ worked | `worked` | Finished normally |
+| ✓ finished (no new geometry) | `no_coord` | Finished normally; a single point produces no new geometry, so this is the usual result of an `scf` job |
+| ! stopped by the time limit | `time_stopped` | SCOPE continues it in a new run (r2, r3…) |
+| ✗ SCF did not converge, aborted | `no_scf_convergence`, `aborted` | Failed. With `-e`, SCOPE resubmits common failures by itself |
+| ◌ output here, not registered yet | — | The output is here but SCOPE has not read it: run the system again (Run page) to register it |
+| … no output here | — | Still running, not downloaded, or not started |
+| ? unknown | anything else | A status this window does not know |
+
+In the Overview the status is that of the **last** calculation of the state, whose values the state holds; *(after a retry)* means an earlier one stopped or failed and was continued. Labels follow SCOPE's file names: `opt r2` is the second run of job `opt`, and `vc s3 r2` the second run of step 3 of a repeated job.
+
+**ΔE.** Energies are compared only between states with the same formula **and** the same method (software, functional, basis or pseudopotentials, as asked for in the input). ΔE is measured from the lowest of them, in the units you choose. A state with nothing comparable has no ΔE.
+
+> **Note.** A system saved with an add-on (for instance spin crossover, `scope-sco`) needs that add-on to be opened. The launcher installs the add-ons of the checkout; if one is missing, the page says which and gives the install command.
+
+**The State tab.** Choose a state at the top; the line under it gives its energy, method, number of frequencies (imaginary ones in red) and excited states, and the calculations that wrote it. Three sub-tabs:
+
+| Sub-tab | What it shows |
+|---|---|
+| **Spectrum** | IR, vibrational density of states (VDOS) or absorption (UV-vis), whichever this state has. Choose the broadening kernel (gaussian, lorentzian, laplacian), its width (cm⁻¹ for IR and VDOS, eV for absorption) and the range. The curves are computed by SCOPE's own functions (`get_ir_spectrum`, `get_vdos_spectrum`, `get_abs_spectrum`), so they are the ones its `plot_*` functions draw with the same settings. Red lines mark the modes or excited states under the curve. **Save plot…** writes PNG, SVG or PDF |
+| **Frequencies** | Every mode: frequency, IR intensity, reduced mass, symmetry. A negative frequency is imaginary (red): a minimum has none, a transition state exactly one. **Copy frequencies (CSV)** |
+| **Structure** | The geometry of the state with the bonds SCOPE perceived, in 3D and 2D. **Save geometry (.xyz)…** writes it wherever you choose |
+
+A state with no frequencies and no excited states (an `initial` state, a single point) shows its structure. Spectra are computed in memory: nothing is written to the project.
+
+**The Thermochemistry tab.** It lists the states that have frequencies (a frequency job wrote them) and an energy. Choose a state, and optionally a second one to subtract.
+
+| Setting | Meaning |
+|---|---|
+| T from, to, step | The temperature range of the plot (K) |
+| Report at | The temperature whose values are written under the plot (298.15 K by default) |
+| Model | `HO` (harmonic oscillator) or `QRRHO` (Grimme's quasi-rigid-rotor model for low frequencies, with its cutoff) |
+| Imaginary | What to do with imaginary frequencies: `ignore` (left out, usual for a transition state), `absolute` (taken as real, a diagnostic) or `raise` (stop: the state should be a minimum) |
+
+With one state the plot shows G − H<sub>elec</sub>, H<sub>vib</sub> and −T·S against temperature, and the line under it gives G at the chosen temperature. With two states (A minus B) it shows ΔG, ΔH and −TΔS. Where ΔG crosses zero the two states are equally stable: for the high- and low-spin states of a spin-crossover compound this is T½. If ΔG keeps its sign, the page says which state is the more stable throughout.
+
+The numbers are SCOPE's own (`state.get_thermal_data`), per formula unit (cells: divided by Z). Translational and rotational terms are not included, as in SCOPE. The calculation runs on a copy of the state, so nothing in the system changes. **Copy data (CSV)** and **Save plot…** export what is shown.
+
+> **Note.** Subtracting two states of different formula or method is allowed but warned about: their ΔG has no meaning.
+
+**The Compare tab.** Tick the systems to compare (the one shown is ticked), choose *Electronic energy* or *Gibbs energy G(T)* (with its temperature, model and imaginary policy) and press **Compare**. Other systems are read in the background, read-only, and kept until their file changes. Δ is measured from the lowest value among the states with the same formula **and** method, across all the systems ticked; states with nothing comparable are listed without Δ. Select a row to plot its group as bars. **Copy table (CSV)** and **Save plot…** export it.
+
+> **Note.** The method shown is the one SCOPE's input asked for (software, functional, basis). If an output was produced with other settings than its input file says, the page cannot tell.
+
+**Export.** **Export → Copy table (CSV)** puts the table of the current tab on the clipboard; **Save table as CSV…** writes it where you choose. On the State tab this is the spectrum shown (curve and sticks) or the frequencies, whichever sub-tab is open. Every CSV starts with comment lines (`# …`) that say where its numbers come from: the system file with its date and size, the SCOPE version that saved it and the one reading it, the environment whose folders were used, the export time, and the settings (units, model, temperatures, spectrum width…). Plots saved with **Save plot…** carry the same text inside the file: the *Description* of a PNG or SVG, the *Subject* of a PDF. **Show folder** opens the system's *Computations* folder.
+
+**Older copies.** When a download replaces the system file, the previous one is kept as `<system>.npy.bak-<date>`. **Older copies (N)** lists them; choose one to see it beside the current file: one row per state with its energy, status and number of runs then and now, and what changed (*computed since*, *energy changed*, *status changed*, *more runs*, *new state*, *not in the current file*). Tick *Only states that changed* to hide the rest. The copy is read like the current file, read-only, and the page keeps showing the current file.
+
+**Notebooks.** **Open in notebook** writes a new Jupyter notebook for the system shown and opens it in Jupyter Lab, in your browser. The notebook:
+
+- opens the system with `open_system`, the same entry point as this page, so it shows the same data, and prints where it comes from and which Python runs it;
+- follows Tutorials 3 and 4: sources and states, energies and ΔE, frequencies and the IR spectrum (and absorption, if there are excited states), thermochemistry, and ΔG(T) between two comparable states with the temperature where it changes sign;
+- starts from the state shown in the State tab and the two states of the Thermochemistry tab; with nothing chosen, it takes the first suitable ones itself, so it runs on any system, even one with nothing computed yet;
+- never calls `system.save()`: the analyses change the system in memory only.
+
+| Question | Answer |
+|---|---|
+| Where are notebooks written? | In `<project>/Notebooks/`, next to *Sources*, *Systems* and *Computations*. Uploads and downloads never touch this folder |
+| Will my edits be overwritten? | No. A notebook is written once; the next one is `<system>-2.ipynb`, then `-3`, and so on |
+| Which Python runs it? | The Python of this window, so the same SCOPE and add-ons. The first cell says so, and warns if the kernel is another Python |
+| One Jupyter or many? | One per window. A second notebook opens in the Jupyter Lab that is already running |
+| What happens when I close the window? | If Jupyter Lab started from this window is still running, you choose: **Stop it and close** (save your notebooks in the browser first) or **Keep it running** |
+| I use VS Code or another editor | Use the arrow of **Open in notebook → Copy code**: the first cell, which opens the system as this page does, goes to the clipboard |
+| And an older copy? | **Open this copy in a notebook**, in the older-copy view, writes and opens a notebook that reads that copy instead of the current file |
+| I clicked twice and nothing opened yet | Jupyter Lab takes a few seconds to start the first time; notebooks written meanwhile open as soon as it is up |
+
 # Reference
 
 ## Local vs cluster
@@ -460,6 +564,15 @@ Worth knowing:
 | Quantum ESPRESSO is amber: *no MPI launcher* | `pw.x` was found but no `mpirun`, `mpiexec` or `srun` is visible after loading the module | Check the module, or ask the cluster support which launcher to use |
 | Profile hint: *Write the path starting with / or ~/* | The path is relative, has spaces or a `$VARIABLE` | Use `/home/you/...` or `~/...` |
 | *Input files with the same name* when you upload or run on the cluster | All inputs go into one `inputs` folder on the cluster, so two files called `opt.scope` would replace each other | Rename one of them in step 3 |
+| Results: *was saved with the SCOPE add-on …, which is not installed here* | The system file uses classes of an add-on (for instance spin crossover) | Run the install command shown, or `./scope-gui --reinstall` |
+| Results: no Spectrum for a state | No frequency or TD-DFT calculation wrote this state | Look at the state written by the `freq` (or `td`) job |
+| Results: the IR spectrum is flat | The output gave no IR intensities (all zero) | Expected for some methods; the Frequencies sub-tab still lists the modes |
+| Results: a state is missing from the Thermochemistry list | It has no frequencies or no energy | Run a frequency job on it |
+| Results: *the 'raise' policy stops at an imaginary frequency* | The state has an imaginary frequency (a transition state, or a geometry that is not a minimum) | Choose *ignore*, or re-optimise the geometry |
+| Results: no ΔE for a state | No other state has the same formula and method, so the energies cannot be compared | Expected |
+| Results: *Jupyter Lab is not installed in this window's Python* | The notebook was written, but Jupyter Lab is missing | Run the install command shown, or open the notebook in VS Code |
+| Results: the notebook does not open in the browser | Jupyter Lab is starting, or failed to | Wait a few seconds; its messages are in `Notebooks/.jupyter-scope-gui.log` |
+| Notebook: *this kernel is not the Python of the SCOPE window* | Jupyter chose another kernel | In Jupyter Lab, *Kernel → Change kernel* and choose *Python 3* of the SCOPE window, or start Jupyter from the window again |
 | A cluster job fails at once with `TMPDIR: parameter null or not set` | SCOPE's job script needs the variable `TMPDIR` on the compute node | Ask the cluster support, or set it in your shell profile |
 
 ## Glossary
@@ -471,6 +584,10 @@ Worth knowing:
 | **Scheduler** | The cluster program that decides when jobs run (Slurm or SGE). |
 | **Module** | The cluster's way to make a program available, for example `module load gaussian/16`. |
 | **Pickle, `.npy` file** | SCOPE's saved objects. Open only trusted ones. |
+| **State** | A snapshot of a source: `initial` when it is imported, then one per calculation result (for instance `pbe_opt`). Calculations read one state and write another. |
+| **Run (r1, r2…)** | One attempt of a job. r2 continues r1 when it stopped or failed. |
+| **Notebook** | A Jupyter file (`.ipynb`) with code and its results. The Results page writes them in `<project>/Notebooks/`; they are yours to edit. |
+| **Provenance** | Where a number comes from: the system file, its date, the SCOPE versions and the settings. Exports start with it. |
 
 ## About this GUI
 
