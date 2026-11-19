@@ -26,7 +26,7 @@ class Environment(object):
         available_queues (list):        Queues discovered for this environment.
         selected_queues (list):         Queues selected for submission.
         method (str):                   Queue scoring strategy.
-        time_limit (int | None):        Input-specific SLURM wall time in minutes; None uses the queue limit.
+        time_limit (int | None):        Input-specific wall time in minutes; None uses the queue limit.
         software_checks (dict):         Most recent static checks of configured software modules.
         qe_launcher (str):              Preferred QE MPI launcher, configurable by the user.
         g16_launcher (str):             Gaussian driver command (normally 'g16').
@@ -35,6 +35,7 @@ class Environment(object):
         set_scheduler():                Detects and stores the active scheduler.
         set_commands():                 Builds scheduler command templates.
         set_queues():                   Collects and configures available queues.
+        update_queue_settings():        Collects missing queue settings or explicitly refreshes them.
         set_paths():                    Stores shared project paths.
         set_software():                 Sets software modules for Gaussian16 and Quantum Espresso 7.0.
         check_software():               Inspects configured modules without launching computations.
@@ -217,7 +218,7 @@ class Environment(object):
             debug (int):                 Verbosity level.
 
         Returns:
-            list: List of discovered queue objects.
+            list: List of discovered queues
         """
         if not hasattr(self,"commands"): self.set_commands()
         self.mqueues = []
@@ -238,6 +239,7 @@ class Environment(object):
                     # Add queue
                     text2 = res2.stdout.rstrip().splitlines()
                     new_queue = Queue(name, self)
+                    new_queue.update_settings(debug=max(debug-1,0))
                     self.add_mqueue(new_queue) 
 
         ## Parse for SLURM ##
@@ -246,10 +248,28 @@ class Environment(object):
                 if idx > 0 and len(line.split()) == 6: 
                     name, avail, time_limit, num_nodes, state, name_nodes = line.split()
                     new_queue = Queue(name, self, avail=avail, time_limit=time_limit, state=state)
+                    if new_queue.name not in [queue.name for queue in self.mqueues]: new_queue.update_settings(debug=max(debug-1,0))
                     self.add_mqueue(new_queue) 
                     ## Note: It should be possible to get the queue memory or mem-per-cpu doing: "sinfo -o "%15N %10c %10m  %25f %10G""
         else: print("ENV.GET_MQUEUES: SLURM or SGE were not detected. Assuming this is a local computer")
         return self.mqueues
+
+    ######
+    def update_queue_settings(self, force: bool=False, debug: int=0) -> bool:
+        """Collects missing settings for known queues, including older Environments.
+
+        force=True refreshes settings even when already collected. Queues shared
+        between lists are queried once. Saving the Environment retains updates.
+
+        Returns:
+            bool: Whether settings were retrieved for every known queue.
+        """
+        queues = []
+        for name in ('mqueues','available_queues','selected_queues'):
+            for queue in getattr(self,name,[]):
+                if all(queue is not other for other in queues): queues.append(queue)
+        results = [queue.update_settings(force=force,debug=max(debug-1,0)) for queue in queues]
+        return bool(results) and all(results)
 
     def add_mqueue(self, new_queue: object):
         if new_queue.name not in list(q.name for q in self.mqueues): 
@@ -502,6 +522,7 @@ class Environment(object):
         # Select best
         best_idx = np.argmax(scores) 
         if debug > 0: print(f"GET_BEST_QUEUE: selected best_idx={best_idx} of {scores}")
+        target_queues[best_idx].update_settings(debug=max(debug-1,0))
         if debug > 0: print(f"GET_BEST_QUEUE: returning {target_queues[best_idx].name}")
         return target_queues[best_idx]
 

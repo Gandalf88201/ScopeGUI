@@ -1,6 +1,6 @@
 import subprocess
+import shlex
 from datetime                  import datetime, timedelta
-from scope.parse_general       import slurm_time_to_minutes
 
 #############
 ### QUEUE ###
@@ -14,11 +14,16 @@ class Queue(object):
         alter_name (str):               Original queue name.
         available (bool):               Whether the queue is available for use.
         selected (bool):                Whether the queue has been selected.
+        time_limit (float | None):      Maximum wall time in minutes.
+        default_time_limit (float | None): Default wall time in minutes, when available.
+        soft_time_limit (float | None): Soft wall-time limit in minutes, when available.
+        notify_time (float | None):     Queue-controlled notification interval in seconds.
         _environment (object):          Parent environment.
         commands (dict):                Scheduler commands for this queue.
 
     Methods:
         set_nodes():                    Discovers nodes in the queue.
+        update_settings():              Collects missing queue settings or explicitly refreshes them.
         get_overall_usage():            Aggregates queue occupancy data.
         get_user_running():             Counts running jobs and CPUs for the user.
         get_queue_score():              Scores the queue for submission.
@@ -30,12 +35,95 @@ class Queue(object):
         self.name                = fix_partition_name(name)
         self.alter_name          = name
         self.time_limit_plain    = time_limit
-        self.time_limit          = slurm_time_to_minutes(time_limit)
+        seconds                  = _queue_time_to_seconds(time_limit, _environment.scheduler)
+        self.time_limit          = None if seconds is None else seconds/60
+        if self.time_limit is not None and self.time_limit.is_integer(): self.time_limit = int(self.time_limit)
+        self.default_time_limit  = None
+        self.soft_time_limit     = None
+        self.notify_time         = None
+        self._settings_overrides = {}
         self.state               = state
         self.selected            = False
         self._environment        = _environment
         self.set_commands()
         #self.set_max_mem()      # Not ready
+
+    ######
+    def update_settings(self, force: bool=False, debug: int=0) -> bool:
+        """Retrieves the queue's configured time limits and notification interval.
+
+        Uses scontrol for SLURM and qconf for SGE. Wall times are in minutes;
+        notify_time is in seconds. None means unlimited, unavailable or not
+        applicable; time_limit_plain retains the scheduler's original limit.
+        SGE host overrides are retained in _settings_overrides. Each shared
+        attribute uses the shortest configured interval across queue instances.
+
+        Initializes missing attributes on older Queues. A failed query retains
+        known limits and leaves unavailable settings as None. Queries are attempted
+        once per object unless force=True; saving the Environment retains them.
+
+        Returns:
+            bool: Whether all relevant settings were successfully retrieved.
+        """
+        from scope.classes_environment import run_command
+        attributes = ('time_limit','default_time_limit','soft_time_limit','notify_time')
+        if not force and hasattr(self,'_settings_loaded') and all(hasattr(self,name) for name in attributes): return self._settings_loaded
+
+        # 1) Supplies missing attributes without discarding known limits.
+        for name in attributes:
+            if not hasattr(self,name): setattr(self,name,None)
+        if not hasattr(self,'_settings_overrides'): self._settings_overrides = {}
+        if not hasattr(self,'time_limit_plain'): self.time_limit_plain = None
+        scheduler = self._environment.scheduler
+        if scheduler == 'sge' and not hasattr(self,'_settings_loaded') and self.time_limit_plain is None: self.time_limit = None
+        self._settings_loaded = False
+
+        # 2) Reads the configuration once, including wrapped SGE lines.
+        if   scheduler == 'slurm': command = f'scontrol show partition {shlex.quote(self.name)} -o'
+        elif scheduler == 'sge':   command = f'qconf -sq {shlex.quote(self.name)}'
+        else: return False
+        result = run_command(command)
+        if not result.ok:
+            if debug > 0: print(f'QUEUE.UPDATE_SETTINGS: {self.name}: settings unavailable; retaining known limits')
+            return False
+        if scheduler == 'slurm':
+            settings = dict(item.split('=',1) for item in result.stdout.split() if '=' in item)
+            fields   = [('MaxTime','time_limit',60),('DefaultTime','default_time_limit',60)]
+        else:
+            lines    = result.stdout.replace('\\\n',' ').splitlines()
+            settings = dict(line.split(None,1) for line in lines if len(line.split(None,1)) == 2)
+            fields   = [('h_rt','time_limit',60),('s_rt','soft_time_limit',60),('notify','notify_time',1)]
+
+        # 3) Normalizes units and retains host-specific settings for inspection.
+        complete = True
+        for field, name, divisor in fields:
+            if field not in settings:
+                complete = False
+                continue
+            try:
+                entries   = settings[field].split(',')
+                seconds   = _queue_time_to_seconds(entries[0].strip(), scheduler)
+                intervals = [seconds] if seconds is not None else []
+                overrides = {}
+                for entry in entries[1:]:
+                    host, value = entry.strip().removeprefix('[').removesuffix(']').split('=',1)
+                    seconds = _queue_time_to_seconds(value, scheduler)
+                    overrides[host] = None if seconds is None else seconds/divisor
+                    if seconds is not None: intervals.append(seconds)
+                value = min(intervals)/divisor if intervals else None
+                if value is not None and value.is_integer(): value = int(value)
+            except ValueError:
+                complete = False
+                if debug > 0: print(f'QUEUE.UPDATE_SETTINGS: {self.name}: could not read {field}={settings[field]!r}')
+                continue
+            setattr(self,name,value)
+            if overrides: self._settings_overrides[name] = overrides
+            else:         self._settings_overrides.pop(name,None)
+            if name == 'time_limit': self.time_limit_plain = settings[field]
+
+        self._settings_loaded = complete
+        if debug > 0: print(f'QUEUE.UPDATE_SETTINGS: {self.name}: time_limit={self.time_limit}, default_time_limit={self.default_time_limit}, soft_time_limit={self.soft_time_limit} min; notify_time={self.notify_time} s')
+        return complete
 
     ######
     def set_commands(self):
@@ -206,6 +294,9 @@ class Queue(object):
         if self.alter_name != self.name:  to_print += f' Alternative Name      = {self.alter_name}\n'
         to_print += f' Time Limit Plain      = {self.time_limit_plain}\n'
         to_print += f' Time Limit (min)      = {self.time_limit} minutes\n'
+        to_print += f' Default Time (min)    = {getattr(self,"default_time_limit",None)}\n'
+        to_print += f' Soft Time (min)       = {getattr(self,"soft_time_limit",None)}\n'
+        to_print += f' Notification (s)      = {getattr(self,"notify_time",None)}\n'
         if hasattr(self,"num_nodes"):  to_print += f' Number of Nodes       = {self.num_nodes}\n'
         if hasattr(self,"priority"):   to_print += f' Priority              = {self.priority}\n'
         if hasattr(self,"score"):      to_print += f' Score                 = {self.score}\n'
@@ -318,3 +409,35 @@ def fix_partition_name(name):
     for ch in invalid_chars:
         name = name.replace(ch, '')
     return name
+
+
+def _queue_time_to_seconds(value: str | None, scheduler: str) -> int | None:
+    """Converts a scheduler configuration time to seconds, or None for no limit.
+
+    Accepts SLURM's minutes, MM:SS, HH:MM:SS and day-prefixed formats. SGE
+    accepts integer seconds or HH:MM:SS, including omitted zero fields.
+    None and scheduler markers for unlimited/unset values return None.
+    Invalid times raise ValueError.
+    """
+    if value is None: return None
+    value = str(value).strip().lower()
+    if value in ('infinity','infinite','unlimited','none','n/a','(null)'): return None
+    days = 0
+    if scheduler == 'sge' and ':' not in value:
+        base = 16 if value.startswith('0x') else 8 if value.startswith('0') and len(value) > 1 else 10
+        seconds = int(value,base)
+        if seconds < 0: raise ValueError(f'Negative queue time: {value}')
+        return seconds
+    if scheduler == 'slurm' and '-' in value:
+        day_part, value = value.split('-',1)
+        if not day_part.isdecimal(): raise ValueError(f'Invalid queue time: {value}')
+        days = int(day_part)
+        parts = value.split(':')
+        parts += ['0']*(3-len(parts))
+    else:
+        parts = value.split(':')
+        if scheduler == 'slurm' and len(parts) == 1: parts += ['0']
+    if scheduler == 'sge': parts = [part or '0' for part in parts]
+    if len(parts) not in (2,3) or (scheduler == 'sge' and len(parts) != 3) or not all(part.isdecimal() for part in parts):
+        raise ValueError(f'Invalid queue time: {value}')
+    return days*86400 + sum(int(part)*60**idx for idx,part in enumerate(reversed(parts)))

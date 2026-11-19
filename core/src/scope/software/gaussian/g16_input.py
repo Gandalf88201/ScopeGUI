@@ -159,12 +159,15 @@ def gen_g16_subfile(comp: object, queue: object, module: str, procs: int=1, save
     Scheduler stdout/stderr use absolute paths in the computation folder.
     Runs in an isolated directory inside TMPDIR and removes it after copying logs
     and requested checkpoints. A failed copy retains scratch and reports its path.
-    SLURM requests an advance warning 10-60 seconds before the time limit.
-    USR1/TERM/INT stop the calculation before returning partial results; these
-    interruptions exit with code 124 after copying. SIGKILL cannot be handled.
+    SLURM requests a USR1 warning 10-60 seconds before the time limit. SGE
+    requests h_rt in HH:MM:SS and uses -notify/USR2, or s_rt/USR1 when a
+    soft limit is configured. Copying depends on the queue's notify interval.
+    Warnings and TERM/INT return partial results and exit with code 124.
+    SIGKILL cannot be handled.
     """
     import shlex
-    from scope.utils.core_tools import gen_run_block, get_slurm_signal_time
+    from scope.utils.core_tools import gen_run_block, gen_sge_time_directives, get_slurm_signal_time
+    warning_signal = 'USR1'
     stderr_path = shlex.quote(os.path.abspath(os.path.join(comp.path, comp.name+'.stderr')))
     stdout_path = shlex.quote(os.path.abspath(os.path.join(comp.path, comp.name+'.stdout')))
 
@@ -188,20 +191,23 @@ def gen_g16_subfile(comp: object, queue: object, module: str, procs: int=1, save
             print(f"#SBATCH --nodes=1", file=sub)
             print(f"#SBATCH --ntasks={procs}", file=sub)
             time_limit = getattr(queue._environment,'time_limit',None) # If the user supplies a time limit, it is stored in the environment
-            if time_limit is None: time_limit = queue.time_limit       # If not, then it uses the default time limit of the queue.
-            print(f"#SBATCH --time={time_limit}", file=sub)
+            if time_limit is None: time_limit = queue.time_limit       # Otherwise requests the queue's maximum wall time.
+            if time_limit is not None: print(f"#SBATCH --time={time_limit}", file=sub)
             print(f"#SBATCH --signal=B:USR1@{get_slurm_signal_time(time_limit)}", file=sub)
             print(f"", file=sub)
             print(f"module load {module}", file=sub)
             print(f"", file=sub)
         elif queue._environment.scheduler == 'sge':
             print(f"#!/bin/bash", file=sub)
+            print(f"#$ -S /bin/bash", file=sub)
             print(f"#$ -N {comp.name}", file=sub)
             print(f"#$ -o {stdout_path}", file=sub)
             print(f"#$ -e {stderr_path}", file=sub)
             print(f"#$ -q {queue.name}" , file=sub)
             print(f"#$ -pe smp {procs}", file=sub)
             print(f"#$ -cwd", file=sub)
+            time_directives, warning_signal = gen_sge_time_directives(queue, debug=max(debug-1,0))
+            print(time_directives, file=sub)
             print(f"", file=sub)
             #print(f"source /etc/profile.d/modules.csh", file=sub)
             #print(f"source $HOME/.bashrc", file=sub)
@@ -220,7 +226,7 @@ def gen_g16_subfile(comp: object, queue: object, module: str, procs: int=1, save
         print(f"cat tmp1 {shlex.quote(comp.inp_name)} > tmp2 && mv -f tmp2 {shlex.quote(comp.inp_name)} || exit 1", file=sub)
         run_command = f"{launch_command} < {shlex.quote(comp.inp_name)} > {shlex.quote(comp.out_name)}"
         print('', file=sub)
-        print(gen_run_block(run_command), file=sub)
+        print(gen_run_block(run_command, warning_signal=warning_signal, notify_time=getattr(queue,'notify_time',None)), file=sub)
 
         # Return results before removing the working files, also after a Gaussian error.
         copy_command = 'cp -pr -- *.log "$JOBDIR/"'

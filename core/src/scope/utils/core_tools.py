@@ -94,27 +94,84 @@ def get_slurm_signal_time(time_limit: int | str | None, debug: int=0) -> int:
     return min(60,max(10,seconds//10)) if seconds > 0 else 60
 
 
-def gen_run_block(run_command: str, debug: int=0) -> str:
-    """Returns Bash commands that stop a calculation on USR1/TERM/INT before copying results.
+def gen_sge_time_directives(queue: object, debug: int=0) -> tuple[str,str]:
+    """Returns SGE wall-time directives and the signal that triggers result copying.
+
+    Uses the Environment's requested time_limit, or the Queue's maximum, in
+    minutes. Omits h_rt when neither limit is available. Older Queues collect
+    missing settings when possible; unavailable settings use -notify/USR2.
+
+    Without a finite soft limit, -notify requests USR2 before termination; USR1
+    then denotes suspension. A finite s_rt instead uses USR1 for termination
+    warning and omits -notify to avoid that ambiguity. Its value is reduced when
+    necessary to leave copying time before h_rt. The queue's notify interval
+    controls the grace period; zero or unavailable intervals cannot guarantee it.
+    Assumes SGE's standard warning signals.
+    """
+    from scope.classes_queue import _queue_time_to_seconds
+    if hasattr(queue,'update_settings'): queue.update_settings(debug=max(debug-1,0))
+
+    # 1) Converts the requested and configured wall times from minutes to seconds.
+    time_limit = getattr(queue._environment,'time_limit',None)
+    if time_limit is None: time_limit = getattr(queue,'time_limit',None)
+    soft_limit = getattr(queue,'soft_time_limit',None)
+    notify     = getattr(queue,'notify_time',None)
+    if isinstance(time_limit,str): time_limit = _queue_time_to_seconds(time_limit,'slurm')
+    elif time_limit is not None:   time_limit = int(time_limit*60)
+    if isinstance(soft_limit,str): soft_limit = _queue_time_to_seconds(soft_limit,'slurm')
+    elif soft_limit is not None:   soft_limit = int(soft_limit*60)
+
+    # 2) Selects the appropriate SGE warning without confusing it with suspension.
+    directives = []
+    if soft_limit is None:
+        directives.append('#$ -notify')
+        warning_signal = 'USR2'
+    else:
+        warning_signal = 'USR1'
+        if time_limit is not None:
+            margin = int(notify) if notify is not None and notify > 0 else min(60,max(1,time_limit//10))
+            soft_limit = min(soft_limit,max(1,time_limit-margin))
+
+    # 3) Writes hours without a day prefix, as required by SGE.
+    for resource, seconds in [('h_rt',time_limit),('s_rt',soft_limit)]:
+        if seconds is not None:
+            hours, remainder = divmod(seconds,3600)
+            minutes, seconds = divmod(remainder,60)
+            directives.append(f'#$ -l {resource}={hours:02d}:{minutes:02d}:{seconds:02d}')
+    if debug > 0: print(f'GEN_SGE_TIME_DIRECTIVES: {queue.name}: warning={warning_signal}, notify={notify} s')
+    return '\n'.join(directives), warning_signal
+
+
+def gen_run_block(run_command: str, warning_signal: str='USR1', notify_time: float | None=None, debug: int=0) -> str:
+    """Returns Bash commands that stop a calculation before copying partial results.
 
     Runs the command and its local children in a separate process group.
-    Allows two seconds after TERM before forcing that group to stop. Sets
+    Allows at most two seconds after TERM before forcing that group to stop,
+    using at most half of notify_time when that interval is known. Sets
     run_status=124 on interruption, otherwise 0 as in existing submissions.
     The caller copies results, cleans scratch and exits with run_status.
-    SIGKILL cannot be handled; SLURM needs an advance-warning directive.
+    warning_signal is USR1 for SLURM and SGE soft limits, or USR2 for SGE
+    -notify. With USR2, suspension warnings on USR1 are ignored. TERM/INT
+    also trigger copying. SIGKILL cannot be handled; scheduler grace periods
+    must allow enough time to stop the calculation and copy its files.
     """
-    return f'''# Stop the calculation on a time warning or termination request
+    if warning_signal not in ('USR1','USR2'): raise ValueError('GEN_RUN_BLOCK: warning_signal must be USR1 or USR2')
+    signals       = f'{warning_signal} TERM INT'
+    stop_timeout  = 2 if notify_time is None else min(2,max(0,notify_time/2))
+    stop_checks   = int(stop_timeout*10)
+    suspension    = "# Leave SGE suspension warnings to the scheduler\ntrap '' USR1\n\n" if warning_signal == 'USR2' else ''
+    return suspension + f'''# Stop the calculation on a time warning or termination request
 run_status=0
 calculation_pid=
 stop_calculation() {{
-    trap '' USR1 TERM INT
+    trap '' {signals}
     run_status=124
     echo "SCOPE: Interrupted; returning partial output"
     if [ -n "$calculation_pid" ]; then
         kill -TERM -- "-$calculation_pid" 2>/dev/null
 
-        # Allow up to two seconds for the calculation and local children to stop
-        for attempt in {{1..20}}; do
+        # Allow up to {stop_checks/10:g} seconds for the calculation and local children to stop
+        for ((attempt=0; attempt<{stop_checks}; attempt++)); do
             if ! kill -0 -- "-$calculation_pid" 2>/dev/null; then break; fi
             sleep 0.1
         done
@@ -125,7 +182,7 @@ stop_calculation() {{
         wait "$calculation_pid" 2>/dev/null
     fi
 }}
-trap stop_calculation USR1 TERM INT
+trap stop_calculation {signals}
 
 # Start the calculation in its own process group, then wait for it
 set -m
@@ -136,5 +193,5 @@ if [ "$run_status" -ne 0 ]; then stop_calculation; fi  # Warning during startup
 wait "$calculation_pid" 2>/dev/null
 
 # The calculation has stopped; allow the result-copy blocks below to finish
-trap '' USR1 TERM INT
+trap '' {signals}
 '''
