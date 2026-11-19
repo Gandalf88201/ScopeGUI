@@ -55,24 +55,18 @@ SYSTEM   = {system!r}{copy}
 GUI_PYTHON = {sys.executable!r}       # the Python of the SCOPE window that wrote this notebook
 GUI_PREFIX = {sys.prefix!r}
 
-# System files hold RDKit molecules: a file written with another RDKit version makes RDKit print one warning per molecule while it is read.
-# They are muted during the reading only; the RDKit version is printed below.
-try:
-    import rdkit
-    from rdkit import RDLogger
-except ImportError: rdkit = RDLogger = None
-if RDLogger: RDLogger.DisableLog("rdApp.*")
-try:
-    # The same entry point as the Results page: the system file is read and its paths are pointed at this computer's folders, in memory only.
-    system, prov = results.open_system(ENV_FILE, SYSTEM{", FILE" if file else ""})
-finally:
-    if RDLogger: RDLogger.EnableLog("rdApp.*")
+# The same entry point as the Results page: the system file is read and its paths are pointed at this computer's folders, in memory only.
+# RDKit's per-molecule warnings about a newer RDKit are counted into prov.rdkit_note (printed below) instead of filling this cell.
+system, prov = results.open_system(ENV_FILE, SYSTEM{", FILE" if file else ""})
 summary = results.summarize(system)
+try: import rdkit
+except ImportError: rdkit = None
 
 print(f"System file:  {{prov.file}}  ({{prov.size / 1e6:.2f}} MB)")
 print(f"Saved by SCOPE {{prov.saved_version or '?'}}, read with SCOPE {{prov.local_version}} ({{scope.__file__}})")
 print(f"Folders of:   {{prov.env_file}}")
 if prov.moved: print(f"Written where SCOPE ran ({{prov.stored_root}}); paths pointed at {{prov.local_root}} for reading")
+if prov.rdkit_note: print("Note:", prov.rdkit_note)
 print(f"Python:       {{sys.executable}}" + (f"  (RDKit {{rdkit.__version__}})" if rdkit else ""))
 if os.path.realpath(sys.prefix) != os.path.realpath(GUI_PREFIX):
     print("Note: this kernel is not the Python of the SCOPE window, so SCOPE or its add-ons may differ. Choose the kernel of", GUI_PYTHON)

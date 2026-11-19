@@ -58,6 +58,7 @@ class Provenance:
     local_root:    str
     backups:       list = field(default_factory=list)
     current_file:  str  = ""                                                   ## the system's own file, when `file` is an older copy of it
+    rdkit_note:    str  = ""                                                   ## e.g. '144 RDKit molecules stored by a newer RDKit (pickle format 16.3; this RDKit reads 16.2)'
 
     @property
     def is_copy(self) -> bool:
@@ -192,6 +193,40 @@ def fingerprint(path: str) -> tuple:
 def system_file(env: object, system: str) -> str:
     return os.path.join(env.systems_path, system, f"{system}.npy")
 
+RDKIT_DEPICKLE = ("Depickling from a version number", "This probably won't work")
+
+class _RDKitDepickle:
+    """While a system file is read: RDKit's 'Depickling from a version number (x) that is higher than our version (y)' warnings (two
+    lines per molecule, hundreds for a large system) are held back and counted, so they become one note instead of a flood. Every other
+    RDKit message is printed as before. RDKit's log is routed to Python's logging (logger 'rdkit') for this; that stays on."""
+    def __init__(self): self.count, self.versions = 0, ""
+    def __enter__(self):
+        import logging
+        self.logger = None
+        try:
+            from rdkit import rdBase
+            rdBase.LogToPythonLogger()
+        except Exception: return self
+        self.logger = logging.getLogger("rdkit"); self.logger.addFilter(self)
+        return self
+    def filter(self, record) -> bool:
+        msg = record.getMessage()
+        if RDKIT_DEPICKLE[0] in msg:
+            import re
+            self.count += 1; m = re.search(r"\(([\d.]+)\).*?\(([\d.]+)\)", msg)
+            if m: self.versions = f"pickle format {m.group(1)}; this RDKit reads {m.group(2)}"
+            return False
+        return RDKIT_DEPICKLE[1] not in msg
+    def __exit__(self, *exc):
+        if self.logger is not None: self.logger.removeFilter(self)
+        return False
+    @property
+    def note(self) -> str:
+        if not self.count: return ""
+        try: import rdkit; here = f", RDKit {rdkit.__version__}"
+        except Exception: here = ""
+        return f"{self.count} RDKit molecule(s) stored by a newer RDKit ({self.versions}{here}). They were read; derived RDKit data could differ."
+
 def open_system(env, system: str, file: str="") -> tuple:
     """Loads a system and points its paths at the folders of `env` on this computer, without saving anything or creating folders.
 
@@ -216,7 +251,8 @@ def open_system(env, system: str, file: str="") -> tuple:
     if not os.path.isfile(path):
         if file: raise ResultsError("no_system", f"File not found: {path}", "The copy may have been deleted or moved.")
         raise ResultsError("no_system", f"No system file for '{system}': {path}", "Run the system (Run page), or download its results from the cluster (Cluster page).")
-    try: obj = load_binary(path)
+    try:
+        with _RDKitDepickle() as quiet: obj = load_binary(path)
     except ModuleNotFoundError as exc:
         top = (exc.name or "").split(".")[0]; pkg = ADDONS.get(top, top)
         raise ResultsError("addon", f"'{system}' was saved with the SCOPE add-on '{top}', which is not installed here.", f"Install it in the Python that runs this window:  {os.path.basename(_python())} -m pip install {pkg}")
@@ -225,7 +261,7 @@ def open_system(env, system: str, file: str="") -> tuple:
     st = os.stat(path); stored = getattr(obj, "computations_path", "")
     remap(obj, env, system)
     prov = Provenance(system, path, st.st_size, st.st_mtime, str(getattr(obj, "version", "")), str(getattr(scope, "__version__", "")), env_file, stored, obj.computations_path,
-                      sorted(glob.glob(glob.escape(own) + ".bak-*"), reverse=True), own)
+                      sorted(glob.glob(glob.escape(own) + ".bak-*"), reverse=True), own, quiet.note)
     return obj, prov
 
 def remap(obj: object, env: object, system: str) -> None:
@@ -332,6 +368,7 @@ def provenance_lines(prov: Provenance) -> list:
     if prov.is_copy: lines.append(f"older copy of: {prov.current_file}")
     lines += [f"saved by SCOPE {prov.saved_version or '?'}; read with SCOPE {prov.local_version or '?'}", f"folders of environment: {prov.env_file}"]
     if prov.moved: lines.append(f"written where SCOPE ran: {prov.stored_root} (paths pointed at {prov.local_root} for reading)")
+    if prov.rdkit_note: lines.append(prov.rdkit_note)
     return lines
 
 def header(provs: "Provenance | list | None"=None, settings: "dict | None"=None) -> str:

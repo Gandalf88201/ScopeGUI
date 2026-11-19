@@ -506,3 +506,32 @@ def test_a_real_jupyter_lab_serves_its_settings(tmp_path):
         with urllib.request.urlopen(notebooks.notebook_url(server, str(root), path), timeout=30) as r: assert r.status == 200
     finally:
         notebooks.stop(proc); proc.wait(timeout=30)
+
+def test_rdkit_warnings_about_a_newer_rdkit_become_one_note():
+    """A pickle written with a newer RDKit makes RDKit print two lines per molecule while it is read (288 lines for ABITEM). They are
+    counted into Provenance.rdkit_note; any other RDKit message is still printed."""
+    import logging
+    pytest.importorskip("rdkit")
+    seen = []; catch = logging.Handler(); catch.emit = lambda r: seen.append(r.getMessage())
+    log = logging.getLogger("rdkit"); log.addHandler(catch)
+    quiet = results._RDKitDepickle()
+    with quiet:
+        for _ in range(3):
+            log.warning("[15:51:20] Depickling from a version number (16.3)that is higher than our version (16.2).")
+            log.warning("This probably won't work.")
+        log.warning("something else from RDKit")
+    shown = " ".join(seen)
+    assert quiet.count == 3 and "Depickling" not in shown and "probably" not in shown and "something else from RDKit" in shown
+    assert quiet.note.startswith("3 RDKit molecule(s) stored by a newer RDKit (pickle format 16.3; this RDKit reads 16.2")
+    logging.getLogger("rdkit").warning("Depickling from a version number (1)that is higher than our version (0).")      # only while a file is read
+    log.removeHandler(catch)
+    assert "Depickling" in seen[-1] and quiet.count == 3
+
+@needs_tutorials
+def test_reading_tutorial_1_prints_no_rdkit_flood(tmp_path, capfd):
+    pytest.importorskip("scope_sco")
+    root = tmp_path / "T1"; shutil.copytree(os.path.join(ABITEM, "Systems"), root / "Systems"); (root / "Computations").mkdir(); (root / "Sources").mkdir()
+    env, info = backend.create_environment("t1", str(root / "Sources"), str(root / "Systems"), str(root / "Computations"), str(tmp_path))
+    capfd.readouterr(); obj, prov = results.open_system(info.filepath, "ABITEM"); err = capfd.readouterr().err
+    assert "Depickling" not in err and err.count("\n") < 5
+    assert not prov.rdkit_note or (prov.rdkit_note in results.header(prov) and "newer RDKit" in prov.rdkit_note)                # one line, also in exports

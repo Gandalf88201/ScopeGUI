@@ -414,6 +414,7 @@ system, prov = open_system("/path/to/scope_env_<name>.npy", "water")
 |---|---|
 | *N output file(s) are not on this computer* | SCOPE registered (or expects) these outputs, but they are not here: still running, not downloaded, or not started. Energies and frequencies are in the system file and are shown anyway; reading an output needs the file. **Download missing outputs…** opens the download of the Cluster page with exactly those files ticked |
 | *Saved by SCOPE x, read by y* | The file comes from another SCOPE version. Values are read as stored |
+| *Newer RDKit* | The system file holds molecules written by a newer RDKit than this one. They are read, and RDKit's warnings (two lines per molecule in the terminal) are counted into this one note. Energies and frequencies are SCOPE's own numbers and are not affected |
 | *Older copies kept by downloads* | Each download that replaced the system file kept the previous one as `<system>.npy.bak-<date>`. **Older copies** opens one beside the current file (see below) |
 | *A run of … is going on* | A run of this system is active; the page reloads when it saves the system file |
 

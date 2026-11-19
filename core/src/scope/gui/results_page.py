@@ -653,6 +653,7 @@ class ResultsTab(QWidget):
         if p.moved: notes.append(("written on another computer", f"The file was written where SCOPE ran (<code>{p.stored_root}</code>); its paths are pointed at this computer's folders for reading. Nothing is changed on disk."))
         if p.version_differs: notes.append((f"saved by SCOPE {p.saved_version}", f"Saved by SCOPE {p.saved_version}, read by {p.local_version}: values are read as stored, but objects from very different versions may miss newer fields."))
         if s.missing_outputs: notes.append((f"{len(s.missing_outputs)} output file(s) not here", f"{len(s.missing_outputs)} output file(s) are not on this computer (still running, not downloaded, or not started). Energies and frequencies are in the system file; reading an output needs it here. Use <i>Download missing outputs…</i>."))
+        if p.rdkit_note: notes.append(("newer RDKit", p.rdkit_note + " Usually harmless: energies and frequencies are SCOPE's own numbers."))
         if p.backups: notes.append((copies, f"{copies} of this system file kept by downloads (newest: {os.path.basename(p.backups[0])})."))
         self.notes = notes; theme.set_kind(self.issues, "warn" if s.missing_outputs or p.version_differs else ""); self.render_notes()
 
