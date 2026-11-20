@@ -179,8 +179,8 @@ def list_systems(info: EnvInfo) -> list:
 
 def system_details(filepath: str) -> str:
     """Returns the text representation of a system binary (it is a pickle: only open files you trust)."""
-    from scope.read_write import load_binary
-    system = load_binary(filepath)
+    from scope.gui.results import load_quietly
+    system, _ = load_quietly(filepath)
     if getattr(system,"object_type",None) != "system": raise ValueError(f"Not a System binary file: {filepath}")
     return repr(system)
 

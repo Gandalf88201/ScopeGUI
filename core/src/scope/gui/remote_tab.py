@@ -458,8 +458,21 @@ class RemoteTab(QWidget):
             if d["exit"] == 143: self.status.setText("The cluster run was stopped. Run again: SCOPE continues where it stopped.")
             elif d["exit"] is not None:
                 self.status.setText(f"Cluster run finished with exit code {d['exit']}.")
-                if d["exit"] == 0: self.session.mark("ran"); self.status.setText(f"Cluster run finished with exit code 0. Press Download results… to bring the results back.")
+                if d["exit"] == 0: self.session.mark("ran"); self.after_run_ended(w["profile"], w["system"])
             else: self.status.setText("The cluster run ended without finishing (stopped or killed). Run again: SCOPE continues where it stopped.")
+
+    def after_run_ended(self, p: "remote.Profile", system: str) -> None:
+        """A cluster run ended with exit code 0. `scope run` submits its jobs and ends, so look once (read-only) at the scheduler queue
+        before saying the results can be downloaded."""
+        def done(found: dict) -> None:
+            jobs = remote.queued_jobs(found, p.remote_root, system)
+            if jobs:
+                note = f"SCOPE has ended, but {len(jobs)} job(s) of '{system}' are still in the scheduler queue ({remote.jobs_summary(jobs)})."
+                self.log.appendPlainText(note + " Wait for them, then run again: SCOPE collects their results and goes on. Runs → Check the clusters shows the queue.")
+                self.status.setText(note + " Wait for them, then run again.")
+            elif found.get("scheduler") in ("error", "other"): self.status.setText("Cluster run finished with exit code 0, but the scheduler queue could not be read: its jobs may still be waiting.")
+            else: self.status.setText("Cluster run finished with exit code 0. Press Download results… to bring the results back.")
+        self.background(lambda: remote.parse_runs(remote.run_script(p, remote.list_runs_script(p), timeout=30).stdout), done, "Cluster run finished with exit code 0. Looking at the scheduler queue…")
 
     def stop_watching(self) -> None:
         """Stops following the log; the run itself is not touched."""
@@ -490,8 +503,11 @@ class RemoteTab(QWidget):
             if found["active"]:
                 system, pid, log = next((a for a in found["active"] if a[0] == remote.pid_name(current)), found["active"][0])
                 self.begin_watch(p, system, log, f"Following the active run of '{system}' (process {pid}).")
-            elif found["logs"]: self.log.appendPlainText(f"No run is active on the cluster. The latest log is {found['logs'][0]}"); self.status.setText("No active run.")
-            else: self.status.setText("No run found on the cluster for this project.")
+            else:
+                jobs = remote.queued_jobs(found, p.remote_root, remote.pid_name(current)) if current else []
+                waiting = f"{len(jobs)} job(s) of '{current}' are still in the scheduler queue ({remote.jobs_summary(jobs)}): wait for them, then run again." if jobs else ""
+                if found["logs"]: self.log.appendPlainText(f"No SCOPE run is active on the cluster. The latest log is {found['logs'][0]}" + (f"\n{waiting}" if waiting else ""))
+                self.status.setText(f"No active SCOPE run. {waiting}" if waiting else "No active run." if found["logs"] else "No run found on the cluster for this project.")
         self.background(lambda: remote.parse_runs(remote.run_script(p, remote.list_runs_script(p), timeout=30).stdout), done, f"Looking for runs on {p.host}…")
 
     def running(self) -> bool:

@@ -105,6 +105,12 @@ def stylesheet(c: dict) -> str:
     QListWidget#manualtoc::item:disabled {{ color: {c['sub']}; padding-top: 14px; }}
     QTextBrowser#manualview {{ background: {c['base']}; border: 1px solid {c['border']}; border-radius: 10px; padding: 0; }}
     QFrame#card {{ background: {c['base']}; border: 1px solid {c['border']}; border-radius: 10px; }}
+    QLabel#restitle {{ font-size: 18px; font-weight: 700; color: {c['text']}; }}
+    QLabel#cardtitle {{ color: {c['sub']}; font-size: 11px; font-weight: 700; letter-spacing: 1px; text-transform: uppercase; }}
+    QListWidget#navlist {{ background: transparent; border: none; outline: 0; }}
+    QListWidget#navlist::item {{ padding: 6px 8px; margin: 1px 0; border-radius: 6px; color: {c['text']}; }}
+    QListWidget#navlist::item:hover {{ background: {c['alt']}; }}
+    QListWidget#navlist::item:selected {{ background: {c['highlight']}; color: {c['text']}; font-weight: 600; }}
     """
 
 def set_kind(widget, kind: str) -> None:

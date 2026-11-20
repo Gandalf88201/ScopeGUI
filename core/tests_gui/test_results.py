@@ -473,7 +473,7 @@ def test_open_in_notebook_writes_it_and_starts_or_reuses_jupyter(local, tmp_path
     program, args, jenv, log = started[0]
     assert program == sys.executable and args[:3] == ["-m", "jupyter", "lab"] and f"--ServerApp.root_dir={folder}" in args and args[-1] == first and jenv["JUPYTER_PREFER_ENV_PATH"] == "1"
     second = tab.open_notebook()                                                                              # clicked again while Jupyter is still starting
-    assert os.path.basename(second) == "water-2.ipynb" and len(started) == 1 and stopped == [] and "still starting" in tab.issues.text()
+    assert os.path.basename(second) == "water-2.ipynb" and len(started) == 1 and stopped == [] and "still starting" in tab.message.full_text()
     server.update(url="http://localhost:8899/", token="tok", pid=1, root_dir=folder); tab.poll_jupyter()     # it is up: the waiting notebook opens in it
     assert opened == ["http://localhost:8899/lab/tree/water-2.ipynb?token=tok"] and not tab.jupyter_timer.isActive()
     third = tab.open_notebook()
@@ -485,7 +485,7 @@ def test_open_in_notebook_writes_it_and_starts_or_reuses_jupyter(local, tmp_path
     tab.tabs.setCurrentIndex(0); tab.export_table(); assert out.read_text().startswith("# system: water\n")
     tab.tabs.setCurrentIndex(1); tab.export_table(); assert "branch,workflow,calculation" in out.read_text()
     monkeypatch.setattr(notebooks, "jupyter_missing", lambda: "python -m pip install jupyterlab")
-    fourth = tab.open_notebook(); assert os.path.isfile(fourth) and len(started) == 1 and "pip install jupyterlab" in tab.issues.text()
+    fourth = tab.open_notebook(); assert os.path.isfile(fourth) and len(started) == 1 and "pip install jupyterlab" in tab.message.full_text()
     proc.alive = False                                                                                                            # quit from Jupyter's own menu
     assert tab.close_jupyter() and tab.jupyter is None and stopped == []                                                          # nothing running: no question, no signal
     win.close()
@@ -561,3 +561,79 @@ def test_the_scope_gui_kernel_runs_this_python_and_is_corrected():
     assert KernelSpecManager().get_kernel_spec("scope-gui").argv[0] == sys.executable                                          # Jupyter finds it
     nb = notebooks.build("/x/e.npy", "w", kernel="scope-gui"); assert nb.metadata.kernelspec.name == "scope-gui"
     assert notebooks.build("/x/e.npy", "w").metadata.kernelspec.name == "python3"
+
+def test_plots_zoom_on_a_dragged_region_and_reset(local):
+    """Every plot zooms on a region dragged with the mouse: a mostly horizontal drag zooms x and fits y to what is visible (spectra keep
+    0 at the bottom); a rectangle zooms both axes; a double-click or Reset view shows everything. Redrawing the same plot keeps the zoom."""
+    from PySide6.QtWidgets import QApplication
+    from matplotlib.backend_bases import MouseEvent
+    from scope.gui.plots import PlotCanvas, PlotPanel, Lines
+    app = QApplication.instance() or QApplication([])
+    canvas = PlotCanvas(); panel = PlotPanel(canvas); panel.resize(800, 400); panel.show(); app.processEvents()
+    x = [i * 10.0 for i in range(301)]; sp = results.Spectrum(x, [100.0 if 1000 <= v <= 1100 else (5.0 if v > 2000 else 1.0) for v in x], [(1050.0, 120.0)], "Wavenumber (cm⁻¹)", "IR", "IR · a · b")
+    canvas.plot_spectrum(sp); canvas.draw(); assert canvas.view is None and not panel.reset.isEnabled()
+    def drag(x0, y0, x1, y1, double=False):
+        ax = canvas.ax; (px0, py0), (px1, py1) = ax.transData.transform((x0, y0)), ax.transData.transform((x1, y1))
+        MouseEvent("button_press_event", canvas, px0, py0, button=1, dblclick=double)._process()
+        if double: return
+        MouseEvent("motion_notify_event", canvas, (px0 + px1) / 2, (py0 + py1) / 2, button=1)._process()
+        MouseEvent("button_release_event", canvas, px1, py1, button=1)._process()
+    drag(2100, 3, 2900, 3)                                                                             # horizontal: x only, y fitted
+    (x0, x1), (y0, y1) = canvas.view
+    assert (round(x0), round(x1)) == (2100, 2900) and y0 == 0 and 5 < y1 < 6 and panel.reset.isEnabled()
+    canvas.plot_spectrum(sp); assert canvas.view is not None                                           # same plot, other settings: zoom kept
+    drag(2200, 5.0, 2500, 2)                                                                          # a rectangle: both axes
+    (x0, x1), (y0, y1) = canvas.view; assert (round(x0), round(x1)) == (2200, 2500) and (round(y0, 1), round(y1, 1)) == (2.0, 5.0)
+    assert canvas.ax.get_xlim() == (x0, x1)
+    drag(2300, 3, 2300, 3, double=True); assert canvas.view is None and not panel.reset.isEnabled()  # double-click: everything
+    canvas.zoom_to(1000, 1100); assert canvas.view[1][1] > 120                                       # sticks count for the fit
+    canvas.plot(Lines("other", "T (K)", "G", [("a", [1, 2], [3, 4])])); assert canvas.view is None   # another plot: zoom dropped
+    assert "T 1.5" in canvas.readout(1.5, 3.5)
+    panel.close()
+
+def test_no_button_of_the_compare_tab_is_cut(local):
+    """The Compare tab's 'Tick all' and 'Only this one' fit their text at the default window size (side by side they were cut)."""
+    from PySide6.QtWidgets import QApplication
+    from scope.gui.window import MainWindow
+    app = QApplication.instance() or QApplication([])
+    env, info = local
+    win = MainWindow(); win.resize(1240, 800); win.show(); win.session.set_environment(env, info); win.show_step("results"); tab = win.results_tab
+    assert wait_for(app, lambda: tab.loaded is not None)
+    tab.tabs.setCurrentIndex(4); app.processEvents()
+    for b in (tab.compare.all_btn, tab.compare.this_btn, tab.compare.go):
+        assert b.isVisible() and b.width() >= b.sizeHint().width(), (b.text(), b.width(), b.sizeHint().width())
+    tab.compare.this_btn.click(); assert tab.compare.chosen() == ["water"]
+    win.close()
+
+@needs_tutorials
+def test_the_systems_page_reads_tutorial_1_without_an_rdkit_flood(tmp_path, capfd):
+    """The Systems page (summary and structure view) reads system files too: there as well, RDKit's two lines per molecule become one line."""
+    pytest.importorskip("scope_sco")
+    from scope.gui import structure
+    root = tmp_path / "T1"; shutil.copytree(os.path.join(ABITEM, "Systems"), root / "Systems")
+    path = str(root / "Systems" / "ABITEM" / "ABITEM.npy")
+    capfd.readouterr(); backend.system_details(path); structure.structures_of(path); err = capfd.readouterr().err
+    assert "Depickling" not in err and err.count("\n") <= 2 and all(l.startswith("[SCOPE GUI] ABITEM.npy:") for l in err.splitlines())
+
+def test_compare_starts_afresh_in_another_environment(local, tmp_path):
+    """Switching workspace or project drops the Compare table, plot and cache of the previous one, and a comparison of the previous one
+    that ends after the switch is ignored (on the user's Mac, ABITEM's rows stayed on screen in another project)."""
+    from PySide6.QtWidgets import QApplication
+    from scope.gui.window import MainWindow
+    app = QApplication.instance() or QApplication([])
+    env, info = local
+    win = MainWindow(); win.show(); win.session.set_environment(env, info); win.show_step("results"); tab = win.results_tab; cmp = tab.compare
+    assert wait_for(app, lambda: tab.loaded is not None)
+    R = results.CompareRow
+    rows = [R("water", "a", "opt", "H2-O", "g16 pbe", -76.0), R("water", "b", "opt", "H2-O", "g16 pbe", -76.01)]
+    cmp.done((rows, [], {"water": (("x",), None)}, "energy", 298.15, [], {}), cmp.generation)
+    assert cmp.table.rowCount() == 2 and cmp.canvas.last is not None and cmp.cache
+    stale = cmp.generation
+    other = tmp_path / "O"; env2, info2 = backend.create_environment("other", str(other / "Sources"), str(other / "Systems"), str(other / "Computations"), str(other))
+    x = tmp_path / "benzene.xyz"; x.write_text("3\nb\nC 0 0 0\nH 0 0 1.1\nH 0 1.1 0\n"); backend.import_xyz(env2, str(x))
+    win.session.set_environment(env2, info2); app.processEvents()
+    assert cmp.rows == [] and cmp.table.rowCount() == 0 and cmp.canvas.last is None and cmp.cache == {}
+    assert [cmp.list.item(i).text() for i in range(cmp.list.count())] == ["benzene"] and "Tick systems" in cmp.status.text()
+    cmp.done((rows, [], {}, "energy", 298.15, [], {}), stale)                                              # the old comparison ends late
+    assert cmp.rows == [] and cmp.table.rowCount() == 0
+    win.close()
