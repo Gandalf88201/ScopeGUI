@@ -658,19 +658,116 @@ def stop_script(p: Profile, system: str) -> str:
     """Asks the cluster run of a system to end: its whole process group, only if the pid is still that run."""
     return "\n".join([*_common(p, system), 'if [ -f "$PIDF" ] && alive "$(cat "$PIDF")" "$N"; then PID=$(cat "$PIDF"); kill -TERM -- -"$PID" 2>/dev/null || kill -TERM "$PID" 2>/dev/null; echo stopped; else echo "no run"; fi']) + "\n"
 
+LASTLINE, QUEUELINE, JOBLINE, REALROOT = "__SCOPE_GUI_LAST__", "__SCOPE_GUI_QUEUE__", "__SCOPE_GUI_JOB__", "__SCOPE_GUI_REALROOT__"
+
+## The jobs of the user in the scheduler queue, one `JOBLINE id|state|name|working folder|its physical path` line each (SGE gives no
+## folder), after a `QUEUELINE slurm|sge|other|none|error` line. `scope run` submits its jobs and ends, so the queue is where a cluster run
+## goes on. `qstat` alone is not taken for SGE: PBS/Torque have one too, with another output, which would read as an empty queue. SGE is
+## recognised as SCOPE recognises it (qconf), or by $SGE_ROOT; any other `qstat` is 'other' (a scheduler this window cannot read).
+_QUEUE_LINES = ['U=${USER:-$(id -un)}',
+                f'echo "{REALROOT} $(cd "$ROOT" 2>/dev/null && pwd -P)"',
+                'if command -v squeue >/dev/null 2>&1; then',
+                '  if Q=$(squeue -h -u "$U" -o "%i|%T|%j|%Z" 2>/dev/null); then echo "' + QUEUELINE + ' slurm"',
+                '    printf "%s\\n" "$Q" | while IFS= read -r l; do [ -n "$l" ] || continue; wd=${l##*|}; rd=$(cd "$wd" 2>/dev/null && pwd -P); echo "' + JOBLINE + ' $l|$rd"; done',
+                '  else echo "' + QUEUELINE + ' error"; fi',
+                'elif command -v qstat >/dev/null 2>&1 && { [ -n "${SGE_ROOT:-}" ] || command -v qconf >/dev/null 2>&1; }; then',
+                '  if Q=$(qstat -r -u "$U" 2>/dev/null); then echo "' + QUEUELINE + ' sge"; printf "%s\\n" "$Q" | awk \'$1 ~ /^[0-9]+$/ {id=$1; st=$5} /Full jobname:/ {sub(/.*Full jobname:[ \\t]*/, ""); print "' + JOBLINE + ' " id "|" st "|" $0 "||"}\'; else echo "' + QUEUELINE + ' error"; fi',
+                'elif command -v qstat >/dev/null 2>&1; then echo "' + QUEUELINE + ' other"',
+                'else echo "' + QUEUELINE + ' none"; fi']
+
 def list_runs_script(p: Profile) -> str:
-    """Lists the runs of this project that are active, and the most recent logs, so a window opened later can find them. Read-only.
-    The system names it reports are the pid_name() form."""
+    """Lists the runs of this project that are active, the newest logs with how each run ended, and the user's jobs in the scheduler
+    queue, so a window opened later can find them. Read-only. The system names it reports are the pid_name() form."""
     return "\n".join([*_common(p), 'for f in "$ROOT"/logs/run_*.pid; do [ -f "$f" ] || continue; PID=$(cat "$f"); n=$(basename "$f" .pid); n=${n#run_}',
                       'if alive "$PID" "$n"; then A=1; else A=0; fi; L=$(ls -t "$ROOT"/logs/run_"$n"_*.log 2>/dev/null | head -1)',
-                      f'echo "{RUNLINE} $n $PID $A $L"; done', f'for f in $(ls -t "$ROOT"/logs/run_*_*.log 2>/dev/null | head -5); do echo "__SCOPE_GUI_LOG__ $f"; done']) + "\n"
+                      f'echo "{RUNLINE} $n $PID $A $L"; done', f'for f in $(ls -t "$ROOT"/logs/run_*_*.log 2>/dev/null | head -5); do echo "__SCOPE_GUI_LOG__ $f"; done',
+                      'ls -t "$ROOT"/logs/run_*_*.log 2>/dev/null | head -50 | while IFS= read -r f; do',
+                      f'  C=$(tail -n 3 "$f" 2>/dev/null | grep "^{EXIT_MARKER_REMOTE} " | tail -n 1 | cut -d" " -f2); echo "{LASTLINE} ${{C:--}} $f"; done',
+                      *_QUEUE_LINES]) + "\n"
+
+@dataclass
+class QueuedJob:
+    """A job of the user in the scheduler queue. workdir is the folder it runs in as the scheduler gives it ('' when it does not say, as
+    with SGE), realdir the same folder with every link resolved ('' when unknown)."""
+    id:      str
+    state:   str
+    name:    str
+    workdir: str = ""
+    realdir: str = ""
+
+    @property
+    def phase(self) -> str:
+        """'pending', 'running', or the scheduler's own state in lower case (held, suspended, error…)."""
+        s = self.state.strip()
+        if s.upper() in ("PENDING", "REQUEUED", "REQUEUE_HOLD", "REQUEUE_FED", "RESV_DEL_HOLD") or s in ("qw", "hqw", "Rq"): return "pending"
+        if s.upper() in ("RUNNING", "CONFIGURING", "COMPLETING", "STAGE_OUT", "SIGNALING", "RESIZING") or s in ("r", "t", "Rr", "Rt"): return "running"
+        return s.lower() or "unknown"
+
+LOG_NAME = re.compile(r"^run_(.+)_(\d{8})_(\d{6})\.log$")
+
+def log_system(path: str) -> str:
+    """The system (pid_name form) of a cluster run log <project>/logs/run_<system>_<YYYYmmdd>_<HHMMSS>.log, or ''."""
+    m = LOG_NAME.match(os.path.basename(path.rstrip("/")))
+    return m.group(1) if m else ""
 
 def parse_runs(stdout: str) -> dict:
-    """{'active': [(system, pid, log)], 'logs': [paths, newest first]}"""
-    active, logs = [], []
+    """{'active': [(system, pid, log)], 'logs': [paths, newest first], 'last': {system: (newest log, exit code or None)},
+        'scheduler': 'slurm', 'sge', 'other' (one this window cannot read), 'none', 'error' or None (not asked),
+        'jobs': [QueuedJob], 'root_real': the project folder with every link resolved ('' if unknown)}"""
+    active, logs, last, scheduler, jobs, root_real = [], [], {}, None, [], ""
     for line in stdout.splitlines():
         if line.startswith(RUNLINE):
             parts = line.split()
             if len(parts) >= 5 and parts[3] == "1": active.append((parts[1], parts[2], parts[4]))
         elif line.startswith("__SCOPE_GUI_LOG__"): logs.append(line.split(None, 1)[1].strip())
-    return {"active": active, "logs": logs}
+        elif line.startswith(LASTLINE + " "):
+            parts = line.split(None, 2)
+            if len(parts) < 3: continue
+            system = log_system(parts[2].strip())
+            if not system or system in last: continue                        ## newest first: the first log of a system is its last run
+            try: code = int(parts[1])
+            except ValueError: code = None
+            last[system] = (parts[2].strip(), code)
+        elif line.startswith(QUEUELINE + " "): scheduler = line.split()[1]
+        elif line.startswith(REALROOT): root_real = line[len(REALROOT):].strip()
+        elif line.startswith(JOBLINE + " "):
+            fields = line[len(JOBLINE) + 1:].split("|", 3)
+            if len(fields) < 3 or not fields[0].strip(): continue
+            rest = fields[3] if len(fields) > 3 else ""
+            workdir, _, realdir = rest.rpartition("|") if "|" in rest else (rest, "", "")
+            jobs.append(QueuedJob(fields[0].strip(), fields[1].strip(), fields[2].strip(), workdir.strip(), realdir.strip()))
+    return {"active": active, "logs": logs, "last": last, "scheduler": scheduler, "jobs": jobs, "root_real": root_real}
+
+def jobs_by_system(jobs: list, root: str, systems: "Iterable[str]"=(), root_real: str="") -> dict:
+    """{system: [QueuedJob]} for the jobs that belong to the project in `root`.
+
+    A job that runs in <root>/Computations/<system>/… belongs to that system. A job elsewhere in the project, or one whose folder is not
+    known (SGE), is matched by its name, which SCOPE starts with the system name (`<system>_<workflow>_<job>_r<n>`), against `systems`.
+    A job whose folder is outside the project belongs to another project and is left out. The folders are compared as written and with
+    their links resolved (`root_real`, the job's realdir), so a project reached through a link (/home → /gpfs/home) still finds its jobs."""
+    roots = [r for r in dict.fromkeys(x.rstrip("/") for x in (root, root_real)) if r]; out = {}
+    names = sorted(set(systems), key=len, reverse=True)                     ## the longest name first: 'water_2' before 'water'
+    for job in jobs:
+        dirs = [d.rstrip("/") for d in (job.workdir, job.realdir) if d]
+        system, inside = "", False
+        for d in dirs:
+            for r in roots:
+                if d == r or d.startswith(r + "/"): inside = True
+                comp = r + "/Computations/"
+                if not system and d.startswith(comp): system = d[len(comp):].split("/")[0]
+        if system: out.setdefault(system, []).append(job); continue
+        if dirs and not inside: continue
+        for s in names:
+            if job.name == s or job.name.startswith(s + "_"): out.setdefault(s, []).append(job); break
+    return out
+
+def queued_jobs(found: dict, root: str, system: str) -> list:
+    """The jobs of one system in the queue, from what list_runs_script found."""
+    return jobs_by_system(found.get("jobs", []), root, [system], found.get("root_real", "")).get(system, [])
+
+def jobs_summary(jobs: list) -> str:
+    """'2 running, 1 pending' (running first, then pending, then any other state), or '' for no job."""
+    counts = {}
+    for job in jobs: counts[job.phase] = counts.get(job.phase, 0) + 1
+    order = ["running", "pending"] + sorted(k for k in counts if k not in ("running", "pending"))
+    return ", ".join(f"{counts[k]} {k}" for k in order if counts.get(k))

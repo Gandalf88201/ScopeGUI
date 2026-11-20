@@ -132,12 +132,25 @@ Runs do not belong to the window, so they keep going whichever workspace is show
 
 ## Runs
 
-The **Runs** page (left bar) lists every run of every workspace in one table: the workspace, the system, where it runs, its state and its log.
+The **Runs** page (left bar) lists every run of every workspace in one table: the workspace, the system, where it runs, its state, its jobs in the scheduler queue, when it started and its log.
 
 - Runs on this computer are refreshed every few seconds while the page is shown.
-- **Check the clusters** asks every cluster project of your workspaces which runs are active. It only reads, and it is the only moment this page contacts a cluster.
+- **Check the clusters** asks every cluster project of your workspaces which runs are active, how the last run of each system ended, and which of your jobs of that project are in the scheduler queue (`squeue` or `qstat`). It only reads, and it is the only moment this page contacts a cluster.
 - **Show** (or a double-click) switches to the run's workspace and follows the run: on the Run page for this computer, on the Cluster page for a cluster.
-- **Stop the run** stops the selected run, here or on its cluster. Jobs already submitted to a scheduler are not cancelled.
+- **Stop the run** stops the selected run, here or on its cluster. Jobs already submitted to a scheduler are not cancelled: cancel them on the cluster with `scancel` or `qdel`.
+
+**State and Jobs are two different things.** *State* is about the SCOPE run itself. On a cluster, a SCOPE run submits its jobs to the scheduler and ends, often within a minute, while the jobs can wait in the queue for hours. So:
+
+| State | Meaning |
+|---|---|
+| running | SCOPE is working now. |
+| waiting for jobs | SCOPE has ended, and jobs it submitted are still in the queue. The *Jobs* column says how many are running or pending (hover over it for the job ids). |
+| finished (exit 0) | SCOPE has ended and, on a cluster, none of the system's jobs is left in the queue. Run again to let SCOPE collect the results and go on with the next jobs. |
+| stopped / ended without finishing | SCOPE was stopped, or its process disappeared without writing how it ended. |
+
+A job belongs to a system when it runs in the system's folder of the project (`Computations/<system>/…`) or, if the scheduler does not tell the folder, when its name starts with the system name. Folders are also compared with their links resolved, so a project reached through a link (for instance `/home/…` pointing to `/gpfs/home/…`) still finds its jobs.
+
+The queues of Slurm (`squeue`) and SGE (`qstat`, recognised by `qconf` or `$SGE_ROOT`, as SCOPE does) are read. On another scheduler the Jobs column says *scheduler not recognised*, never *none in queue*. The Jobs column of a cluster row shows the queue as it was at the last check; runs on this computer use no queue (—). The Cluster page does the same when a run it follows ends: it looks at the queue once, and says that jobs are still waiting instead of offering to download the results.
 
 ## How SCOPE thinks
 
