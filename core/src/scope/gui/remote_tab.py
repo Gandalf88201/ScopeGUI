@@ -554,7 +554,7 @@ class RemoteTab(QWidget):
             jobs = remote.queued_jobs(found, p.remote_root, system)
             if jobs:
                 note = f"SCOPE has ended, but {len(jobs)} job(s) of '{system}' are still in the scheduler queue ({remote.jobs_summary(jobs)})."
-                self.log.appendPlainText(note + " Wait for them, then run again: SCOPE collects their results and goes on. Runs → Check the clusters shows the queue.")
+                self.log.appendPlainText(note + " Wait for them, then run again: SCOPE collects their results and goes on. Runs → Refresh shows the queue.")
                 self.status.setText(note + " Wait for them, then run again.")
             elif found.get("scheduler") in ("error", "other"): self.status.setText("Cluster run finished with exit code 0, but the scheduler queue could not be read: its jobs may still be waiting.")
             elif remote.unread_count(found, system):

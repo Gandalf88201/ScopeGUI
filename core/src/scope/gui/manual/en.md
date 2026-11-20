@@ -136,7 +136,8 @@ Runs do not belong to the window, so they keep going whichever workspace is show
 The **Runs** page (left bar) lists every run of every workspace in one table: the workspace, the system, where it runs, its state, its jobs in the scheduler queue, when it started and its log.
 
 - Runs on this computer are refreshed every few seconds while the page is shown.
-- **Check the clusters** asks every cluster project of your workspaces which runs are active, how the last run of each system ended, and which of your jobs of that project are in the scheduler queue (`squeue` or `qstat`). It only reads, and it is the only moment this page contacts a cluster.
+- **Refresh** updates the runs on this computer and asks every cluster project of your workspaces which runs are active, how the last run of each system ended, and which of your jobs of that project are in the scheduler queue (`squeue` or `qstat`). It only reads, and it is the only moment this page contacts a cluster. The line under the table says when it last refreshed and what each cluster answered.
+- **Clean up…** removes the ended runs of this computer from the list and deletes their logs (in the window's own `gui_runs` folder), after asking. Running runs are kept, results are not touched (they are in the system files), and the rows of the clusters stay: each shows the latest state of a system there, including results not read yet.
 - **Show** (or a double-click) switches to the run's workspace and follows the run: on the Run page for this computer, on the Cluster page for a cluster.
 - **Stop the run** stops the selected run, here or on its cluster. Jobs already submitted to a scheduler are not cancelled: cancel them on the cluster with `scancel` or `qdel`.
 

@@ -936,6 +936,38 @@ def update_runs(change: "Callable[[list], None]") -> list:
         records = load_runs(); change(records); save_runs(records)
     return records
 
+def cleanable_runs() -> tuple:
+    """What Clean up would remove on this computer: (ended run records, log files). A record is ended when its run is not running
+    (finished, stopped, or lost); the log files are those of ended records plus run logs in runs_dir() that no record names any more
+    (records beyond the last 30 are dropped, their logs stayed). Logs of running runs are never included. Read-only."""
+    records = [r for r in load_runs() if r.get("kind") == "local"]
+    running = {os.path.abspath(r.get("log", "")) for r in records if run_state(r)[0] == "running"}
+    ended = [r for r in records if os.path.abspath(r.get("log", "")) not in running]
+    folder = runs_dir(); logs = set()
+    for r in ended:
+        log = os.path.abspath(r.get("log", ""))
+        if os.path.dirname(log) == os.path.abspath(folder) and os.path.isfile(log): logs.add(log)       ## only the GUI's own folder
+    named = {os.path.abspath(r.get("log", "")) for r in load_runs()}
+    for name in os.listdir(folder):
+        path = os.path.abspath(os.path.join(folder, name))
+        if name.startswith("run_") and name.endswith(".log") and path not in named and path not in running: logs.add(path)
+    return ended, sorted(logs)
+
+def clean_runs() -> tuple:
+    """Removes the ended local runs from the run records and deletes their logs (see cleanable_runs). Running runs, and records of
+    other kinds, are kept. Returns (records removed, log files deleted)."""
+    with runs_lock():
+        ended, logs = cleanable_runs(); gone = {r.get("id") or r.get("log") for r in ended}
+        records = load_runs(); keep = [r for r in records if (r.get("id") or r.get("log")) not in gone]
+        try:
+            with open(os.path.join(runs_dir(), "runs.json"), "w") as f: json.dump(keep, f, indent=2)
+        except OSError: return 0, 0
+    deleted = 0
+    for log in logs:
+        try: os.remove(log); deleted += 1
+        except OSError: pass
+    return len(records) - len(keep), deleted
+
 def start_detached_local(env_path: str, system: str, inputs: list, quiet: bool=False, verbose: bool=False, errors: bool=False) -> dict:
     """Starts `scope run` so that it does not depend on the window.
 

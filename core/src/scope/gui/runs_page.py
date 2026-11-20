@@ -1,11 +1,11 @@
 """Runs page: every run of every workspace in one table, on this computer and on the clusters.
 
 Runs on this computer come from the run records (refreshed every few seconds while the page is shown). Runs on a cluster are asked for
-only when the user presses Check the clusters: the window never contacts a host by itself. A row can be shown (the window switches to
+only when the user presses Refresh: the window never contacts a host by itself. Clean up removes the ended runs of this computer. A row can be shown (the window switches to
 its workspace and follows it), and a run can be stopped from here.
 
 On a cluster, `scope run` submits its jobs to the scheduler and ends: the run is then over but its jobs may wait in the queue for hours.
-So Check the clusters also reads the scheduler queue, the State column says 'waiting for jobs' while jobs of a system are queued, and the
+So Refresh also reads the scheduler queue, the State column says 'waiting for jobs' while jobs of a system are queued, and the
 Jobs column says how many are running or pending.
 """
 import os
@@ -130,16 +130,18 @@ class RunsPage(QWidget):
         self.table = QTableWidget(0, len(COLUMNS)); self.table.setHorizontalHeaderLabels(COLUMNS); self.table.verticalHeader().setVisible(False)
         self.table.horizontalHeaderItem(3).setToolTip("The SCOPE run itself. On a cluster it submits jobs and ends: 'waiting for jobs' means it has ended but jobs it submitted are still in the queue; "
                                                      "'done, results not read yet' means the jobs have ended but SCOPE has not read their outputs: run again on the cluster to read them.")
-        self.table.horizontalHeaderItem(4).setToolTip("Jobs of this system in the scheduler queue of the cluster, as found by the last Check the clusters. Runs on this computer use no queue.")
+        self.table.horizontalHeaderItem(4).setToolTip("Jobs of this system in the scheduler queue of the cluster, as found by the last Refresh. Runs on this computer use no queue.")
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows); self.table.setSelectionMode(QAbstractItemView.SingleSelection); self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         hh = self.table.horizontalHeader(); last = len(COLUMNS) - 1
         [hh.setSectionResizeMode(i, QHeaderView.ResizeToContents) for i in range(last)]; hh.setSectionResizeMode(last, QHeaderView.Stretch)
-        self.refresh_btn, self.check_btn, self.show_btn, self.stop_btn = QPushButton("Refresh"), QPushButton("Check the clusters"), QPushButton("Show"), QPushButton("Stop the run")
-        self.check_btn.setToolTip("Asks every cluster project of your workspaces which runs are active and which of their jobs are in the scheduler queue (read-only, over SSH)."); self.show_btn.setProperty("primary", True)
-        self.status = QLabel("Runs on this computer refresh by themselves. Runs on the clusters are checked when you press Check the clusters."); self.status.setWordWrap(True); self.status.setObjectName("pagesub")
-        row = QHBoxLayout(); [row.addWidget(b) for b in (self.show_btn, self.stop_btn, self.refresh_btn, self.check_btn)]; row.addStretch(1)
+        self.refresh_btn, self.clean_btn, self.show_btn, self.stop_btn = QPushButton("Refresh"), QPushButton("Clean up…"), QPushButton("Show"), QPushButton("Stop the run")
+        self.check_btn = self.refresh_btn                                       ## one button: Refresh also asks the clusters
+        self.refresh_btn.setToolTip("Updates the runs on this computer and asks every cluster project of your workspaces which runs are active and which jobs are in the scheduler queue (read-only, over SSH).")
+        self.clean_btn.setToolTip("Removes the ended runs of this computer from the list and deletes their logs. Running runs and the rows of the clusters are kept."); self.show_btn.setProperty("primary", True)
+        self.status = QLabel("Runs on this computer update by themselves. Press Refresh to ask the clusters too."); self.status.setWordWrap(True); self.status.setObjectName("pagesub")
+        row = QHBoxLayout(); [row.addWidget(b) for b in (self.show_btn, self.stop_btn, self.refresh_btn, self.clean_btn)]; row.addStretch(1)
         lay = QVBoxLayout(self); lay.addLayout(row); lay.addWidget(self.table, 1); lay.addWidget(self.status)
-        self.refresh_btn.clicked.connect(self.refresh); self.check_btn.clicked.connect(self.check); self.show_btn.clicked.connect(self.show_selected); self.stop_btn.clicked.connect(self.stop_selected)
+        self.refresh_btn.clicked.connect(self.refresh_all); self.clean_btn.clicked.connect(self.clean_up); self.show_btn.clicked.connect(self.show_selected); self.stop_btn.clicked.connect(self.stop_selected)
         self.table.itemDoubleClicked.connect(lambda _: self.show_selected())
         self.timer = QTimer(self); self.timer.timeout.connect(self.refresh)
         theme.on_change(self.render)
@@ -168,20 +170,37 @@ class RunsPage(QWidget):
                     if r.queued: item.setToolTip("\n".join(f"{q.id}  {q.state}  {q.name}" for q in r.queued))
                 self.table.setItem(i, j, item)
         if 0 <= current < len(self.rows): self.table.selectRow(current)
-        if not self.rows: self.status.setText("No runs yet. Runs started from any workspace appear here." + (f"  Clusters checked at {self.checked}." if self.checked else ""))
+        if not self.rows and self.check_btn.isEnabled(): self.status.setText("No runs yet. Runs started from any workspace appear here." + (f"  Clusters checked at {self.checked}." if self.checked else ""))
 
-    def check(self) -> None:
+    def refresh_all(self) -> None:
+        """The Refresh button: this computer at once, then the clusters (read-only, in the background)."""
+        self.refresh()
+        if not self.check(): self.status.setText(f"Refreshed at {time.strftime('%H:%M:%S')}: {len(self.rows)} run(s) on this computer. No workspace has a cluster project (step 5 · Cluster).")
+
+    def clean_up(self) -> None:
+        """Removes the ended runs of this computer (records and logs), after asking."""
+        ended, logs = backend.cleanable_runs()
+        if not ended and not logs: self.status.setText("Nothing to clean up: no ended run on this computer."); return
+        if QMessageBox.question(self, "Clean up the runs", f"Remove {len(ended)} ended run(s) on this computer from the list and delete {len(logs)} log file(s) of the window "
+                                f"(in {backend.runs_dir()})?\n\nRunning runs are kept. Results are not touched: they are in the system files. The rows of the clusters stay (they show the "
+                                "latest state of each system there, including results not read yet). The deleted logs cannot be recovered.") != QMessageBox.Yes: return
+        removed, deleted = backend.clean_runs(); self.refresh()
+        self.status.setText(f"Cleaned up: {removed} run(s) removed from the list, {deleted} log file(s) deleted.")
+
+    def check(self) -> bool:
+        """Asks the clusters (read-only, in the background). False when no workspace has a cluster project."""
         spaces = [w for w in (workspaces.load(n) for n in workspaces.list_names()) if w]
         projects = cluster_projects(spaces, remote.load_profiles())
-        if not projects: self.status.setText("No workspace has a cluster project yet (step 5 · Cluster)."); return
-        self.check_btn.setEnabled(False); self.status.setText(f"Checking {len(projects)} cluster project(s)…")
+        if not projects: return False
+        if not self.check_btn.isEnabled(): return True                         ## a check is already on its way
+        self.check_btn.setEnabled(False); self.status.setText(f"Refreshing: asking {len(projects)} cluster project(s)…")
         task = Task(lambda: check_clusters(projects)); self.tasks.append(task)
         task.signals.done.connect(self.checked_done); task.signals.failed.connect(lambda m: (self.check_btn.setEnabled(True), self.status.setText(f"Check failed: {m}")))
-        QThreadPool.globalInstance().start(task)
+        QThreadPool.globalInstance().start(task); return True
 
     def checked_done(self, result) -> None:
         self.cluster_rows, messages = result; self.checked = time.strftime("%H:%M:%S"); self.check_btn.setEnabled(True)
-        self.status.setText(f"Clusters checked at {self.checked}: " + "; ".join(messages)); self.refresh()
+        self.status.setText(f"Refreshed at {self.checked}: " + "; ".join(messages)); self.refresh()
 
     def selected(self) -> "RunRow | None":
         row = self.table.currentRow()
