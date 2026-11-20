@@ -87,24 +87,47 @@ def test_check_the_clusters_says_when_the_queue_cannot_be_read_or_there_is_none(
     rows, messages = runs_page.check_clusters(projects_of(p))
     assert [(r.state, r.jobs) for r in rows] == [("finished (exit 0)", "queue not readable")] and "queue not readable" in messages[0]
 
-def test_check_the_clusters_reads_the_sge_queue(cluster, tmp_path, monkeypatch):
+SGE_LIST = """job-ID  prior   name       user         state submit/start at     queue                          slots ja-task-ID
+-----------------------------------------------------------------------------------------------------------------
+   1234 0.55500 water_wf_r user         r     11/20/2026 10:00:00 all.q@node1                        1
+       Full jobname:     water_wf_run1_r1
+   1235 0.00000 water_wf_r user         qw    11/20/2026 10:01:00                                    1
+       Full jobname:     water_wf_run2_r1
+   1236 0.00000 water_wf_r user         qw    11/20/2026 10:01:00                                    1
+       Full jobname:     water_wf_run1_r1
+   1237 0.00000 water_wf_r user         qw    11/20/2026 10:02:00                                    1
+       Full jobname:     water_wf_run3_r1
+   1238 0.00000 benzene_wf user         qw    11/20/2026 10:01:00                                    1
+       Full jobname:     benzene_wf_run1_r1
+"""
+
+SGE_JOBS = """==============================================================
+job_number:                 1234
+sge_o_workdir:              ROOT/Computations/water/demo
+cwd:                        ROOT/Computations/water/demo
+==============================================================
+job_number:                 1235
+sge_o_workdir:              ROOT/Computations/water/demo
+==============================================================
+job_number:                 1236
+sge_o_workdir:              /elsewhere/proj/Computations/water
+cwd:                        /elsewhere/proj/Computations/water
+"""
+
+def test_check_the_clusters_reads_the_sge_queue_and_each_job_folder(cluster, tmp_path, monkeypatch):
     from scope.gui import runs_page
     if shutil.which("squeue"): pytest.skip("a real squeue is on the PATH and would be asked first")
     p = cluster; root = p.remote_root.rstrip("/"); write_log(root, "water", "20261120_101500", 0)
-    fake_tool(tmp_path, monkeypatch, "qconf", "exit 0\n")                      # how SGE is recognised (as SCOPE does)
-    fake_tool(tmp_path, monkeypatch, "qstat", "cat <<'EOF'\n"
-              "job-ID  prior   name       user         state submit/start at     queue                          slots ja-task-ID\n"
-              "-----------------------------------------------------------------------------------------------------------------\n"
-              "   1234 0.55500 water_wf_r user         r     11/20/2026 10:00:00 all.q@node1                        1\n"
-              "       Full jobname:     water_wf_run1_r1\n"
-              "   1235 0.00000 water_wf_r user         qw    11/20/2026 10:01:00                                    1\n"
-              "       Full jobname:     water_wf_run2_r1\n"
-              "   1236 0.00000 benzene_wf user         qw    11/20/2026 10:01:00                                    1\n"
-              "       Full jobname:     benzene_wf_run1_r1\n"
-              "EOF\n")
+    asked = tmp_path / "qstat_j"
+    fake_tool(tmp_path, monkeypatch, "qconf", "exit 0\n")                     # how SGE is recognised (as SCOPE does)
+    fake_tool(tmp_path, monkeypatch, "qstat", f'if [ "$1" = "-j" ]; then echo "$2" > "{asked}"; cat <<\'EOF\'\n' + SGE_JOBS.replace("ROOT", root) + "EOF\nexit 0; fi\n"
+              "cat <<'EOF'\n" + SGE_LIST + "EOF\n")
     rows, messages = runs_page.check_clusters(projects_of(p))
-    assert [(r.system, r.state, r.jobs) for r in rows] == [("water", "waiting for jobs", "1 running, 1 pending")]     # benzene has no run in this project
-    assert "2 job(s) in the queue" in messages[0]
+    # 1234 by cwd, 1235 by the folder it was submitted from, 1237 by name (qstat -j said nothing about it);
+    # 1236 has the same name but runs in another project, and benzene has no run in this project
+    assert [(r.system, r.state, r.jobs) for r in rows] == [("water", "waiting for jobs", "1 running, 2 pending")]
+    assert asked.read_text().strip() == "1234,1235,1236,1237,1238" and "3 job(s) in the queue" in messages[0]
+    tip = {j.id for j in rows[0].queued}; assert tip == {"1234", "1235", "1237"}
 
 def test_a_qstat_that_is_not_sge_is_not_read_as_an_empty_queue(cluster, tmp_path, monkeypatch):
     from scope.gui import runs_page

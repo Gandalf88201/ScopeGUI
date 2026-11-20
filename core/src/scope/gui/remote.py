@@ -660,10 +660,20 @@ def stop_script(p: Profile, system: str) -> str:
 
 LASTLINE, QUEUELINE, JOBLINE, REALROOT = "__SCOPE_GUI_LAST__", "__SCOPE_GUI_QUEUE__", "__SCOPE_GUI_JOB__", "__SCOPE_GUI_REALROOT__"
 
-## The jobs of the user in the scheduler queue, one `JOBLINE id|state|name|working folder|its physical path` line each (SGE gives no
-## folder), after a `QUEUELINE slurm|sge|other|none|error` line. `scope run` submits its jobs and ends, so the queue is where a cluster run
+## The jobs of the user in the scheduler queue, one `JOBLINE id|state|name|working folder|its physical path` line each (empty folders when
+## the scheduler does not tell them), after a `QUEUELINE slurm|sge|other|none|error` line. `scope run` submits its jobs and ends, so the queue is where a cluster run
 ## goes on. `qstat` alone is not taken for SGE: PBS/Torque have one too, with another output, which would read as an empty queue. SGE is
 ## recognised as SCOPE recognises it (qconf), or by $SGE_ROOT; any other `qstat` is 'other' (a scheduler this window cannot read).
+## SGE: `qstat -r` gives the full job names, `qstat -j <ids>` the folder of each job (`cwd:`, as SCOPE submits with `#$ -cwd`, else
+## `sge_o_workdir:`, the folder it was submitted from), so SGE jobs are matched by folder like Slurm ones. A job whose folder cannot be
+## read is still listed, and is then matched by its name.
+_SGE_LINES = r"""  if Q=$(qstat -r -u "$U" 2>/dev/null); then echo "__Q__ sge"
+    J=$(printf "%s\n" "$Q" | awk '$1 ~ /^[0-9]+$/ {id=$1; st=$5} /Full jobname:/ {sub(/.*Full jobname:[ \t]*/, ""); print id "|" st "|" $0}')
+    IDS=$(printf "%s\n" "$J" | cut -d"|" -f1 | grep . | paste -sd, -)
+    D=""; [ -n "$IDS" ] && D=$(qstat -j "$IDS" 2>/dev/null | awk '/^job_number:/ {id=$2} /^cwd:/ {v=$0; sub(/^cwd:[ \t]*/, "", v); c[id]=v} /^sge_o_workdir:/ {v=$0; sub(/^sge_o_workdir:[ \t]*/, "", v); w[id]=v} END {for (i in w) if (!(i in c)) c[i]=w[i]; for (i in c) print i "|" c[i]}')
+    printf "%s\n" "$J" | while IFS= read -r l; do [ -n "$l" ] || continue; wd=$(printf "%s\n" "$D" | awk -F"|" -v i="${l%%|*}" '$1==i {sub(/^[^|]*\|/, ""); print; exit}'); rd=""; [ -n "$wd" ] && rd=$(cd "$wd" 2>/dev/null && pwd -P); echo "__J__ $l|$wd|$rd"; done
+  else echo "__Q__ error"; fi""".replace("__Q__", QUEUELINE).replace("__J__", JOBLINE).split("\n")
+
 _QUEUE_LINES = ['U=${USER:-$(id -un)}',
                 f'echo "{REALROOT} $(cd "$ROOT" 2>/dev/null && pwd -P)"',
                 'if command -v squeue >/dev/null 2>&1; then',
@@ -671,7 +681,7 @@ _QUEUE_LINES = ['U=${USER:-$(id -un)}',
                 '    printf "%s\\n" "$Q" | while IFS= read -r l; do [ -n "$l" ] || continue; wd=${l##*|}; rd=$(cd "$wd" 2>/dev/null && pwd -P); echo "' + JOBLINE + ' $l|$rd"; done',
                 '  else echo "' + QUEUELINE + ' error"; fi',
                 'elif command -v qstat >/dev/null 2>&1 && { [ -n "${SGE_ROOT:-}" ] || command -v qconf >/dev/null 2>&1; }; then',
-                '  if Q=$(qstat -r -u "$U" 2>/dev/null); then echo "' + QUEUELINE + ' sge"; printf "%s\\n" "$Q" | awk \'$1 ~ /^[0-9]+$/ {id=$1; st=$5} /Full jobname:/ {sub(/.*Full jobname:[ \\t]*/, ""); print "' + JOBLINE + ' " id "|" st "|" $0 "||"}\'; else echo "' + QUEUELINE + ' error"; fi',
+                *_SGE_LINES,
                 'elif command -v qstat >/dev/null 2>&1; then echo "' + QUEUELINE + ' other"',
                 'else echo "' + QUEUELINE + ' none"; fi']
 
@@ -687,8 +697,8 @@ def list_runs_script(p: Profile) -> str:
 
 @dataclass
 class QueuedJob:
-    """A job of the user in the scheduler queue. workdir is the folder it runs in as the scheduler gives it ('' when it does not say, as
-    with SGE), realdir the same folder with every link resolved ('' when unknown)."""
+    """A job of the user in the scheduler queue. workdir is the folder it runs in as the scheduler gives it ('' when it could not be
+    read), realdir the same folder with every link resolved ('' when unknown)."""
     id:      str
     state:   str
     name:    str
@@ -741,8 +751,8 @@ def parse_runs(stdout: str) -> dict:
 def jobs_by_system(jobs: list, root: str, systems: "Iterable[str]"=(), root_real: str="") -> dict:
     """{system: [QueuedJob]} for the jobs that belong to the project in `root`.
 
-    A job that runs in <root>/Computations/<system>/… belongs to that system. A job elsewhere in the project, or one whose folder is not
-    known (SGE), is matched by its name, which SCOPE starts with the system name (`<system>_<workflow>_<job>_r<n>`), against `systems`.
+    A job that runs in <root>/Computations/<system>/… belongs to that system. A job elsewhere in the project, or one whose folder could not
+    be read, is matched by its name, which SCOPE starts with the system name (`<system>_<workflow>_<job>_r<n>`), against `systems`.
     A job whose folder is outside the project belongs to another project and is left out. The folders are compared as written and with
     their links resolved (`root_real`, the job's realdir), so a project reached through a link (/home → /gpfs/home) still finds its jobs."""
     roots = [r for r in dict.fromkeys(x.rstrip("/") for x in (root, root_real)) if r]; out = {}
