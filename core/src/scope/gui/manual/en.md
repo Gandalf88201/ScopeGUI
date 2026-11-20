@@ -150,7 +150,7 @@ The **Runs** page (left bar) lists every run of every workspace in one table: th
 
 A job belongs to a system when it runs in the system's folder of the project (`Computations/<system>/…`) or, if the scheduler does not tell the folder, when its name starts with the system name. Folders are also compared with their links resolved, so a project reached through a link (for instance `/home/…` pointing to `/gpfs/home/…`) still finds its jobs.
 
-The queues of Slurm (`squeue`) and SGE (`qstat`, recognised by `qconf` or `$SGE_ROOT`, as SCOPE does) are read. On another scheduler the Jobs column says *scheduler not recognised*, never *none in queue*. The Jobs column of a cluster row shows the queue as it was at the last check; runs on this computer use no queue (—). The Cluster page does the same when a run it follows ends: it looks at the queue once, and says that jobs are still waiting instead of offering to download the results.
+The queues of Slurm (`squeue`) and SGE (`qstat`, recognised by `qconf` or `$SGE_ROOT`, as SCOPE does; each job's folder is read with `qstat -j`) are read. On another scheduler the Jobs column says *scheduler not recognised*, never *none in queue*. The Jobs column of a cluster row shows the queue as it was at the last check; runs on this computer use no queue (—). The Cluster page does the same when a run it follows ends: it looks at the queue once, and says that jobs are still waiting instead of offering to download the results.
 
 ## How SCOPE thinks
 
