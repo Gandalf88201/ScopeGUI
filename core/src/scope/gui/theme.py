@@ -113,6 +113,13 @@ def stylesheet(c: dict) -> str:
     QListWidget#navlist::item:selected {{ background: {c['highlight']}; color: {c['text']}; font-weight: 600; }}
     """
 
+def fit(widget, width: int, height: int) -> None:
+    """Open a window at its preferred size, but never larger than the screen's free area (a 1366x768 laptop minus the taskbar), so the
+    title bar and the buttons at the bottom stay reachable."""
+    screen = widget.screen() or QGuiApplication.primaryScreen()
+    if screen is None: widget.resize(width, height); return
+    free = screen.availableGeometry(); widget.resize(min(width, int(free.width() * 0.95)), min(height, int(free.height() * 0.92)))
+
 def set_kind(widget, kind: str) -> None:
     """Marks a label as 'ok', 'warn' or 'err' so the stylesheet colours it, and recolours it when the theme changes."""
     widget.setProperty("kind", kind); widget.style().unpolish(widget); widget.style().polish(widget)

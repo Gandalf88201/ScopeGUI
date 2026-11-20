@@ -18,11 +18,12 @@ from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QDialog,
 from scope.gui import backend, notebooks, results, theme
 from scope.gui.tasks import Task
 
-GROUP_WORD = {"ok": "✓", "warn": "!", "err": "✗", "unknown": "?", "waiting": "…", "unregistered": "◌", "none": "—"}
+GROUP_WORD = {"ok": "✓", "partial": "◐", "unconverged": "≈", "warn": "!", "err": "✗", "unknown": "?", "waiting": "…", "unregistered": "◌", "none": "—"}
+GROUP_LABEL = {"ok": "finished, converged", "partial": "results, run not finished", "unconverged": "finished, not converged", "none": "no calculation", "waiting": "waiting / not here", "unregistered": "output not read yet"}
 
 def group_colour(group: str) -> str:
     c = theme.colors()
-    return {"ok": c["ok"], "warn": c["warn"], "err": c["err"]}.get(group, c["sub"])
+    return {"ok": c["ok"], "partial": c["warn"], "unconverged": c["warn"], "warn": c["warn"], "err": c["err"]}.get(group, c["sub"])
 
 def item(text: str, tip: str="", colour: str="", align_right: bool=False) -> QTableWidgetItem:
     it = QTableWidgetItem(text)
@@ -39,7 +40,7 @@ def seconds(value: "float | None") -> str:
 class LogViewer(QDialog):
     """A read-only view of an output file, with a search box and a list of lines worth jumping to (terminations, energies, errors)."""
     def __init__(self, parent: QWidget, path: str, title: str):
-        super().__init__(parent); self.setWindowTitle(title); self.resize(1000, 700)
+        super().__init__(parent); self.setWindowTitle(title); theme.fit(self, 1000, 700)
         self.text = QPlainTextEdit(); self.text.setReadOnly(True); self.text.setLineWrapMode(QPlainTextEdit.NoWrap)
         mono = QFont("Menlo"); mono.setStyleHint(QFont.Monospace); self.text.setFont(mono)
         self.marks = QListWidget(); self.marks.setMinimumWidth(320); self.marks.setMaximumWidth(460); self.marks.itemClicked.connect(self.jump)
@@ -369,7 +370,7 @@ class ThermoPanel(QWidget):
             else: cross = f"ΔG keeps its sign from {d.T[0]:g} to {d.T[-1]:g} K: <b>{d.a if d.dG[0] < 0 else d.b}</b> is the more stable throughout (no crossing in this range)."
             text = f"At {t:g} K: <b>ΔG = {d.dG[i] * f:.2f} {units}</b> &nbsp;·&nbsp; ΔH = {d.dH[i] * f:.2f} &nbsp;·&nbsp; −TΔS = {d.mTdS[i] * f:.2f} {units}. {cross}"
             ra, rb = self.row((ta.source, ta.state)), self.row((tb.source, tb.state))
-            if ra and rb and (ra.formula != rb.formula or ra.method != rb.method): notes.append(f"The two states differ in formula or method ({ra.formula} {ra.method} vs {rb.formula} {rb.method}): their ΔG is not a meaningful comparison.")
+            if ra and rb and ra.key != rb.key: notes.append(f"The two states differ in formula, method or charge ({ra.formula} {ra.method} q={ra.charge} vs {rb.formula} {rb.method} q={rb.charge}): their ΔG is not a meaningful comparison.")
         self.summary.setText(text + "".join(f"<br><span style='color:{c['warn']}'>{n}</span>" for n in notes)); theme.set_kind(self.summary, "")
 
     def settings(self) -> dict:
@@ -480,28 +481,28 @@ class ComparePanel(QWidget):
         self.task = None; self.go.setEnabled(True)
         if generation is not None and generation != self.generation: return                         ## for an environment no longer shown
         self.rows, errors, self.cache, self.done_quantity, self.done_temp, self.provs, self.done_settings = out
-        rel = results.compare_relative(self.rows); groups = len({(r.formula, r.method) for r in self.rows if (r.system, r.source, r.state) in rel})
+        rel = results.compare_relative(self.rows); groups = len({r.key for r in self.rows if (r.system, r.source, r.state) in rel})
         what = "electronic energies" if self.done_quantity == "energy" else f"G at {self.done_temp:g} K (per formula unit)"
-        self.status.setText(f"{len(self.rows)} state(s) with {what}; {groups} group(s) of comparable states (same formula and method). Select a row to plot its group."
+        self.status.setText(f"{len(self.rows)} state(s) with {what}; {groups} group(s) of comparable states (same formula, method and charge). Select a row to plot its group."
                             + (" Not loaded: " + "; ".join(errors) if errors else ""))
         theme.set_kind(self.status, "warn" if errors else ""); self.fill()
 
     def fill(self) -> None:
         units = self.units.currentText(); f = results.UNITS[units]; rel = results.compare_relative(self.rows); sub = theme.colors()["sub"]
-        order = sorted(range(len(self.rows)), key=lambda i: ((self.rows[i].system, self.rows[i].source, self.rows[i].state) not in rel, self.rows[i].formula, self.rows[i].method,
+        order = sorted(range(len(self.rows)), key=lambda i: ((self.rows[i].system, self.rows[i].source, self.rows[i].state) not in rel, str(self.rows[i].key),
                                                                 rel.get((self.rows[i].system, self.rows[i].source, self.rows[i].state), 0)))
         self.order = order
         self.table.blockSignals(True); self.table.setRowCount(len(order))
         for k, i in enumerate(order):
             r = self.rows[i]; d = rel.get((r.system, r.source, r.state))
-            note = r.note or ("" if d is not None or r.value is None else "nothing with the same formula and method")
+            note = r.note or ("" if d is not None or r.value is None else "nothing with the same formula, method and charge")
             cells = [item(r.system), item(r.source), item(r.state), item(r.formula), item(r.method, "", sub), item("—" if r.value is None else f"{r.value:.8f}", "", "" if r.value is not None else sub, True),
                      item("" if d is None else f"{d * f:.2f}", f"in {units}", "", True), item(note, note, sub)]
             for j, cell in enumerate(cells): self.table.setItem(k, j, cell)
         self.table.horizontalHeaderItem(6).setText(f"Δ ({units})"); self.table.blockSignals(False)
         first = next((k for k, i in enumerate(order) if (self.rows[i].system, self.rows[i].source, self.rows[i].state) in rel), -1)
         if first >= 0: self.table.selectRow(first)
-        else: self.canvas.show_message("Nothing to compare: no two states share formula and method." if self.rows else "")
+        else: self.canvas.show_message("Nothing to compare: no two states share formula, method and charge." if self.rows else "")
         self.draw()
 
     def draw(self) -> None:
@@ -509,8 +510,8 @@ class ComparePanel(QWidget):
         sel = self.table.selectionModel().selectedRows()
         if not sel or not self.rows: return
         r = self.rows[self.order[sel[0].row()]]; rel = results.compare_relative(self.rows)
-        group = [x for x in self.rows if x.formula == r.formula and x.method == r.method and (x.system, x.source, x.state) in rel]
-        if not group: self.canvas.show_message("This state has nothing comparable (same formula and method) among the systems ticked."); return
+        group = [x for x in self.rows if x.key == r.key and (x.system, x.source, x.state) in rel]
+        if not group: self.canvas.show_message("This state has nothing comparable (same formula, method and charge) among the systems ticked."); return
         group.sort(key=lambda x: rel[(x.system, x.source, x.state)]); units = self.units.currentText(); f = results.UNITS[units]
         multi = len({x.system for x in group}) > 1
         labels = [(f"{x.system} · " if multi else "") + f"{x.source} · {x.state}" for x in group]
@@ -536,7 +537,7 @@ class VersionDialog(QDialog):
     with its energy, status and runs in each. The copy is read like the current file (paths pointed at this computer) and never reloaded."""
     def __init__(self, page: "ResultsTab", path: str):
         super().__init__(page); self.page, self.path, self.old, self.task = page, path, None, None
-        current = page.loaded; self.setWindowTitle(f"{current.provenance.system}: older copy {os.path.basename(path)}"); self.resize(1100, 600)
+        current = page.loaded; self.setWindowTitle(f"{current.provenance.system}: older copy {os.path.basename(path)}"); theme.fit(self, 1100, 600)
         self.head = QLabel(f"Reading <code>{path}</code>…"); self.head.setWordWrap(True); self.head.setTextFormat(Qt.RichText); self.head.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self.table = QTableWidget(0, 9); self.table.setHorizontalHeaderLabels(["Source", "State", "Energy then (Eh)", "Energy now (Eh)", "Δ (kcal/mol)", "Status then", "Status now", "Runs then → now", "Change"])
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers); self.table.verticalHeader().setVisible(False)
@@ -594,7 +595,7 @@ class ResultsTab(QWidget):
         self.table.setTextElideMode(Qt.ElideRight); self.table.setWordWrap(False)
         hh = self.table.horizontalHeader(); [hh.setSectionResizeMode(i, QHeaderView.ResizeToContents) for i in range(9)]; hh.setSectionResizeMode(7, QHeaderView.Stretch)
         hh.setSectionResizeMode(2, QHeaderView.Interactive); hh.resizeSection(2, 130); hh.setMinimumSectionSize(40)                      ## the method elides; Runs takes what is left
-        de_note = ElidedLabel("ΔE is measured within the same formula and method (other energies are not comparable)  ·  double-click a state to open it"); de_note.setObjectName("pagesub")
+        de_note = ElidedLabel("ΔE is measured within the same formula, method (every energy setting) and charge (other energies are not comparable)  ·  double-click a state to open it"); de_note.setObjectName("pagesub")
         urow = hrow("ΔE in", self.units, stretch=False); urow.addSpacing(12); urow.addWidget(de_note, 1)
         over = QWidget(); ol = QVBoxLayout(over); ol.setContentsMargins(10, 10, 10, 10); ol.setSpacing(8); ol.addLayout(urow); ol.addWidget(self.table, 1)
         ## Computations
@@ -625,9 +626,11 @@ class ResultsTab(QWidget):
                                         "The arrow: copy the code that opens this system as this page does (for VS Code or any other editor).",
                                         [("Copy code (the notebook's first cell)", self.copy_code)], lambda: self.open_notebook())
         self.older_btn = QToolButton(); self.older_btn.setText("Older copies"); self.older_btn.setPopupMode(QToolButton.InstantPopup); self.older_menu = QMenu(self.older_btn); self.older_btn.setMenu(self.older_menu)
-        self.older_btn.setToolTip("Copies of this system file kept by downloads (<system>.npy.bak-<time>): open one beside the current file")
-        actions = QHBoxLayout(); actions.setSpacing(8); [actions.addWidget(b) for b in (self.reload_btn, self.folder_btn, self.export_btn, self.older_btn)]
-        actions.addStretch(1); [actions.addWidget(b) for b in (self.notebook_btn, self.missing_btn)]
+        self.older_btn.setToolTip("Copies of this system file kept by downloads and by changes on the Systems page (<system>.npy.bak-<time>, the newest 10 of edits): open one beside the current file")
+        files, more = QHBoxLayout(), QHBoxLayout(); files.setSpacing(8); more.setSpacing(8)      ## two rows: the window can be narrow
+        [files.addWidget(b) for b in (self.reload_btn, self.folder_btn, self.export_btn, self.older_btn)]; files.addStretch(1)
+        [more.addWidget(b) for b in (self.notebook_btn, self.missing_btn)]; more.addStretch(1)
+        actions = QVBoxLayout(); actions.setSpacing(6); actions.addLayout(files); actions.addLayout(more)
         self.message.hide()
         self.jupyter, self.jupyter_root, self.jupyter_pending, self.dialogs = None, "", [], []           ## the Jupyter Lab this window started, the folder it serves, notebooks to open once it is up
         self.jupyter_timer = QTimer(self); self.jupyter_timer.setInterval(1000); self.jupyter_timer.timeout.connect(self.poll_jupyter); self.jupyter_waited = 0
@@ -708,6 +711,9 @@ class ResultsTab(QWidget):
         if p.version_differs: notes.append((f"saved by SCOPE {p.saved_version}", f"Saved by SCOPE {p.saved_version}, read by {p.local_version}: values are read as stored, but objects from very different versions may miss newer fields."))
         if s.unread_outputs: notes.append((f"{len(s.unread_outputs)} outputs not read yet", f"{len(s.unread_outputs)} output file(s) are on this computer but SCOPE has not read them yet, so their energies and frequencies are not in the system file (marked ◌). "
                                             "SCOPE reads outputs when it runs: run the system on the Run page to read them here. If they came from the cluster, you can instead press Run on the cluster again and download the system file."))
+        doubtful = [r for r in s.states if r.group in ("partial", "unconverged")]
+        if doubtful: notes.append((f"{len(doubtful)} states not converged", f"{len(doubtful)} state(s) hold values from a calculation that did not finish normally (◐) or did not converge (≈): "
+                                   + ", ".join(f"{r.source} · {r.state}" for r in doubtful[:8]) + ("…" if len(doubtful) > 8 else "") + ". SCOPE stores the last values it could extract; treat them as provisional."))
         if s.missing_outputs: notes.append((f"{len(s.missing_outputs)} outputs not here", f"{len(s.missing_outputs)} output file(s) are not on this computer (still running, not downloaded, or not started). Energies and frequencies are in the system file; reading an output needs it here. Use <i>Download missing outputs…</i>."))
         if p.rdkit_note: notes.append(("newer RDKit", p.rdkit_note + " Usually harmless: energies and frequencies are SCOPE's own numbers."))
         if p.backups: notes.append((copies, f"{copies} of this system file kept by downloads (newest: {os.path.basename(p.backups[0])})."))
@@ -754,12 +760,12 @@ class ResultsTab(QWidget):
             de = rel.get((r.source, r.state)); colour = group_colour(r.group); sub = theme.colors()["sub"]
             energy = item(f"{r.energy:.8f}" if r.energy is not None else "—", r.energy_note or "Energy as registered by SCOPE, in Hartree", "" if r.energy is not None else sub, True)
             minimum = "" if r.minimum is None else ("yes" if r.minimum else "no")
-            status = {"none": "no calculation", "waiting": "waiting / not here"}.get(r.group, r.group) + (" (after a retry)" if r.retried else "")
-            cells = [item(r.source, f"{r.source_type} {r.formula}"), item(r.state), item(r.method, "As asked for in SCOPE's input", sub), energy,
+            status = GROUP_LABEL.get(r.group, r.group) + (" (after a retry)" if r.retried else "")
+            cells = [item(r.source, f"{r.source_type} {r.formula}"), item(r.state), item(r.method, "As asked for in SCOPE's input: every setting that changes the energy. ΔE is only given between states with the same method, formula and charge" + ("" if r.charge is None else f" (charge {r.charge:+d})"), sub), energy,
                      item("" if de is None else f"{de * factor:.2f}", f"ΔE in {units}", "", True),
                      item(minimum, "From the frequencies: no imaginary frequency" if r.minimum else ("Has imaginary frequencies" if r.minimum is False else "No frequencies computed"), theme.colors()["err"] if r.minimum is False else ""),
                      item(str(r.n_imag) if r.n_freqs else "", f"{r.n_freqs} frequencies", theme.colors()["err"] if r.n_imag else "", True),
-                     item(", ".join(r.runs), (", ".join(r.runs) + "\n" if r.runs else "") + "Calculations that wrote this state, in order. The values come from the last one."), item(f"{GROUP_WORD.get(r.group, '?')} {status}", "", colour)]
+                     item(", ".join(r.runs), (", ".join(r.runs) + "\n" if r.runs else "") + "Calculations that wrote this state, in order. The values come from the last one."), item(f"{GROUP_WORD.get(r.group, '?')} {status}", results.GROUP_TEXT.get(r.group, "") or ("SCOPE extracted results, the program finished normally and converged." if r.group == "ok" else ""), colour)]
             for j, cell in enumerate(cells): self.table.setItem(i, j, cell)
         self.table.horizontalHeaderItem(4).setText(f"ΔE ({units})")
 

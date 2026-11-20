@@ -243,10 +243,24 @@ class InputReport:
     want_submit: bool          = True
     procs:       int           = 1
     queues:      list          = field(default_factory=list)
+    istate:      str           = "initial"
+    fstate:      str           = ""
+
+    @property
+    def selectors(self) -> list:
+        """The workflow selectors as a list of lower-case strings ('*', 'hs*', 'water')."""
+        return selector_list(self.workflow)
+
+    @property
+    def workflow_label(self) -> str:
+        """The workflow selector as written in a node name: '*', 'hs*' or 'a,b'."""
+        return ",".join(self.selectors) or "?"
 
     @property
     def node(self) -> str:
-        return f"{self.branch}/{self.job}"
+        """Identity of this job in the pipeline: branch/workflow/job. Two files with one branch and job but different workflows
+        (for instance the high-spin and the low-spin sources) are two different jobs, as they are in SCOPE."""
+        return f"{self.branch}/{self.workflow_label}/{self.job}"
 
 def read_input(path: str) -> InputReport:
     """Parses and validates a Scope input file with SCOPE's own functions, without loading any system.
@@ -279,14 +293,57 @@ def _read_input(content: str, isfile: bool) -> InputReport:
     report.procs       = int(environment.requested_procs)
     raw_queues         = getattr(environment, "queues", getattr(environment, "queue", ""))
     report.queues      = [q.strip() for q in str(raw_queues).split(",") if q.strip()]
+    report.istate      = str(getattr(job_data, "istate", "initial"))
+    report.fstate      = str(getattr(job_data, "fstate", report.job))
     return report
+
+def selector_list(workflow) -> list:
+    """job_data.workflow as SCOPE reads it (one selector or a list), lower-cased."""
+    items = [workflow] if isinstance(workflow, str) else list(workflow or [])
+    return [str(s).strip().lower() for s in items if str(s).strip()]
+
+def selectors_overlap(a: list, b: list, sources: "list | None"=None) -> "bool | None":
+    """Whether two workflow selectors can pick a common source. With the source names of a system, the answer is exact (SCOPE's own
+    fnmatch rule). Without them: True when both pick the same names for sure ('*', identical selectors, or a pattern that matches the
+    other's plain name), False when both are plain names that differ, None when it depends on the sources (two different patterns)."""
+    from fnmatch import fnmatchcase
+    if sources is not None:
+        names = [s.lower() for s in sources]
+        pick  = lambda sel: {n for n in names for x in sel if fnmatchcase(n, x)}
+        return bool(pick(a) & pick(b))
+    if "*" in a or "*" in b or set(a) & set(b): return True
+    plain = lambda x: not any(ch in x for ch in "*?[")
+    for names, patterns in ((a, b), (b, a)):
+        if all(plain(x) for x in names):                                   ## plain names on one side: matching them is exact
+            return any(fnmatchcase(n, p) for n in names for p in patterns)
+    return None
+
+GEOMETRY_TYPES = ("opt", "relax", "vc-relax", "ts")                         ## computation types that write a new geometry into fstate
+
+def geometry_state(r: "InputReport") -> str:
+    """The state a job that follows r should start from: the one r writes when r makes a geometry (opt, ts…) or adds its results to the
+    state it read (freq into 'opt'); otherwise r writes its results into a new state that holds no coordinates (an scf writing 'sp'),
+    so the next job starts from the geometry r used, r's istate."""
+    return r.fstate if r.comp_type in GEOMETRY_TYPES or r.fstate == r.istate else r.istate
+
+def suggest_states(job: str, comp_type: str, requisites: str, reports: list, branch: str="", workflow: str="*") -> tuple:
+    """(istate, fstate) to propose in the input form. A job that waits for another one most likely wants that job's result, so istate is the
+    fstate of the first requisite found among the loaded files (same branch, overlapping workflow), else 'initial'. A job that writes a
+    geometry (opt, ts…) writes its own state, named after the job (SCOPE's default); any other job (freq, scf, td) adds its results to the
+    state it reads, so frequencies and energy sit on the optimised geometry."""
+    sel, istate = selector_list(split_names(workflow) if isinstance(workflow, str) else workflow) or ["*"], ""
+    for name in split_names(requisites):
+        found = [r for r in reports if r.ok and r.job == name and (not branch or r.branch == branch.strip().lower().replace(" ", "_")) and selectors_overlap(r.selectors, sel) is not False]
+        if found: istate = geometry_state(found[0]) or found[0].job; break
+    if not istate: return "initial", job.strip() or "job"                    ## no requisite found: SCOPE's own defaults
+    return istate, (job.strip() or "job") if comp_type in GEOMETRY_TYPES else istate
 
 ##################
 ### Input form ###
 ##################
 SECTIONS       = ("environment", "options", "job_data", "qc_data")
 SOFTWARE_TYPES = {"g16": ["scf", "opt", "freq", "ts", "td", "tda"], "qe": ["scf", "opt", "relax", "vc-relax", "freq"]}
-FORM_KEYS      = {"environment": ["requested_procs", "queue", "queues"], "options": ["want_submit"], "job_data": ["branch", "workflow", "job", "requisites", "constrains"], "qc_data": ["software", "comp_type", "functional", "basis"]}
+FORM_KEYS      = {"environment": ["requested_procs", "queue", "queues"], "options": ["want_submit"], "job_data": ["branch", "workflow", "job", "istate", "fstate", "requisites", "constrains"], "qc_data": ["software", "comp_type", "functional", "basis"]}
 
 def parse_sections(text: str) -> dict:
     """Reads the raw `key = value` pairs of each &section of an input file, keeping order and the value text as written.
@@ -326,19 +383,22 @@ def split_names(text: str) -> list:
     """Splits 'a, b  c' into ['a', 'b', 'c']."""
     return [n for n in re.split(r"[,\s]+", text.strip()) if n]
 
-def build_sections(branch: str, workflow: str, job: str, requisites: str, constrains: str, software: str, comp_type: str, functional: str, basis: str, procs: int, want_submit: bool, queue: str="", extras: dict=None) -> dict:
+def build_sections(branch: str, workflow: str, job: str, requisites: str, constrains: str, software: str, comp_type: str, functional: str, basis: str, procs: int, want_submit: bool, queue: str="", extras: dict=None,
+                   istate: str="", fstate: str="") -> dict:
     """Builds the four sections from the form values.
 
     workflow, requisites and constrains accept several names separated by commas or spaces (one name stays a plain
     string, several become a list). basis is written only for Gaussian 16. want_submit is always written, because
-    SCOPE assumes True when it is missing. extras maps a section to raw `key = value` text; those keys are added
-    after the form keys and replace them if they repeat one.
+    SCOPE assumes True when it is missing. istate and fstate are written when given (SCOPE's defaults are 'initial' and
+    the job name). extras maps a section to raw `key = value` text; those keys are added after the form keys and
+    replace them if they repeat one.
     """
     names, req, con = split_names(workflow), split_names(requisites), split_names(constrains) or ["self"]
+    states = {k: py_value(v.strip()) for k, v in (("istate", istate), ("fstate", fstate)) if v and v.strip()}
     sections = {
         "environment": {"requested_procs": str(int(procs))},
         "options":     {"want_submit": py_value(bool(want_submit))},
-        "job_data":    {"branch": py_value(branch.strip()), "workflow": py_value(names[0] if len(names) == 1 else names), "job": py_value(job.strip()), "hierarchy": "1", "requisites": py_value(req), "constrains": py_value(con)},
+        "job_data":    {"branch": py_value(branch.strip()), "workflow": py_value(names[0] if len(names) == 1 else names), "job": py_value(job.strip()), **states, "hierarchy": "1", "requisites": py_value(req), "constrains": py_value(con)},
         "qc_data":     {"software": py_value(software), "comp_type": py_value(comp_type), "functional": py_value(functional.strip() or "pbe")},
     }
     if queue.strip(): sections["environment"]["queue"] = py_value(queue.strip())
@@ -362,6 +422,7 @@ def sections_to_form(sections: dict) -> tuple:
     def names(value): return ", ".join(value) if isinstance(value, (list, tuple)) else str(value)
     queue = get("environment", "queue", get("environment", "queues", ""))
     form  = {"branch": str(get("job_data", "branch")), "workflow": names(get("job_data", "workflow", "*")), "job": str(get("job_data", "job")), "requisites": names(get("job_data", "requisites", [])), "constrains": names(get("job_data", "constrains", ["self"])),
+             "istate": str(get("job_data", "istate", "")), "fstate": str(get("job_data", "fstate", "")),
              "software": str(get("qc_data", "software", "g16")), "comp_type": str(get("qc_data", "comp_type", "scf")), "functional": str(get("qc_data", "functional", "pbe")), "basis": str(get("qc_data", "basis", "")),
              "procs": int(get("environment", "requested_procs", 4)) if str(get("environment", "requested_procs", 4)).isdigit() else 4, "want_submit": get("options", "want_submit", True) is True, "queue": str(queue)}
     extras = {}
@@ -369,6 +430,111 @@ def sections_to_form(sections: dict) -> tuple:
         lines = [f"{k} = {v}" for k, v in sections.get(name, {}).items() if k not in FORM_KEYS[name] and not (name == "job_data" and k == "hierarchy" and v == "1")]
         extras[name] = "\n".join(lines)
     return form, extras
+
+NEXT_TYPE = {"opt": "freq", "ts": "freq", "relax": "freq", "vc-relax": "freq"}         ## what usually follows a geometry job
+
+def followup_form(report: "InputReport", reports: list=()) -> tuple:
+    """The input form for a new job that runs after `report`'s job, as (form, extras): same branch, sources, software, method, resources,
+    queue and submission; requisites = that job; a job type that usually follows it (freq after a geometry job, else scf) and a name not
+    used yet in the branch. istate and fstate are left empty so the editor fills them from the requisite (istate = the state that job
+    writes). Settings of the &qc_data, &environment and &options tabs are copied; those of &job_data (job_setup, max_steps…) are not,
+    because they describe that job only."""
+    with open(report.path) as fh: form, extras = sections_to_form(parse_sections(fh.read()))
+    kind = NEXT_TYPE.get(report.comp_type, "scf")
+    if kind not in SOFTWARE_TYPES.get(form["software"], [kind]): kind = SOFTWARE_TYPES[form["software"]][0]
+    taken = {r.job for r in reports if r.ok and r.branch == report.branch}
+    name = kind if kind not in taken else next(f"{kind}{i}" for i in range(2, 1000) if f"{kind}{i}" not in taken)
+    form.update(job=name, comp_type=kind, requisites=report.job, constrains="self", istate="", fstate="")
+    extras["job_data"] = ""
+    return form, extras
+
+@dataclass
+class Link:
+    """What linking job A before job B changes in B's input file (see link_jobs). Nothing is written until the caller saves new_text."""
+    path:     str
+    old_text: str
+    new_text: str
+    notes:    list
+
+    @property
+    def diff(self) -> list:
+        """The settings that change, one per line: `~ key: old → new`, `+ key = value` (added) or `- key = value` (removed), with its section.
+        Settings are compared, not lines, so the realignment of a rewritten file is not reported as a change."""
+        old, new = parse_sections(self.old_text), parse_sections(self.new_text); out = []
+        for sec in SECTIONS:
+            for k in dict.fromkeys([*old.get(sec, {}), *new.get(sec, {})]):
+                a, b = old.get(sec, {}).get(k), new.get(sec, {}).get(k)
+                if a == b: continue
+                out.append(f"+ {k} = {b}   (&{sec})" if a is None else f"- {k} = {a}   (&{sec})" if b is None else f"~ {k}: {a}  →  {b}   (&{sec})")
+        return out
+
+def link_jobs(a: InputReport, b: InputReport, reports: list, sources: "list | None"=None, b_text: "str | None"=None) -> Link:
+    """Makes job B wait for job A and start from A's result: A is added to B's requisites and B's istate becomes the state A writes
+    (B's fstate follows when B adds its results to the state it reads, as a freq or scf job does). Refuses, with the reason, what SCOPE
+    could not follow: jobs of different branches or of sources that never meet, a job linked to itself, a link already there, or one
+    that would close a cycle. When B already waits for a job whose result it starts from, that stays its initial state: only the timing
+    changes (a job reads one state). b_text is B's current text when it differs from the file (a chain changes files one after another
+    in memory). Returns the new text of B's file for a preview; the file itself is not touched."""
+    import networkx as nx
+    if not (a.ok and b.ok): raise ValueError("Both input files must be valid first.")
+    if a.path == b.path or a.node == b.node: raise ValueError("A job cannot wait for itself.")
+    if a.branch != b.branch: raise ValueError(f"'{a.job}' is in branch '{a.branch}' and '{b.job}' in branch '{b.branch}'. SCOPE only waits for jobs of the same branch: give both the same branch first.")
+    if selectors_overlap(a.selectors, b.selectors, sources) is False: raise ValueError(f"'{a.job}' runs on sources '{a.workflow_label}' and '{b.job}' on '{b.workflow_label}': no source runs both, and SCOPE only waits for a job of the same source.")
+    if a.job in b.requisites: raise ValueError(f"'{b.job}' already waits for '{a.job}'.")
+    if a.job == b.job: raise ValueError(f"Both jobs are called '{a.job}': SCOPE would read it as the job waiting for itself. Rename one first.")
+    _, edges, _ = build_graph(reports, sources)
+    graph = nx.DiGraph(); graph.add_edges_from((x, y) for x, y, k in edges if k == "requisite")
+    if b.node in graph and a.node in graph and nx.has_path(graph, b.node, a.node): raise ValueError(f"'{a.job}' already waits (directly or through other jobs) for '{b.job}': this link would make a cycle, and neither could start.")
+    if b_text is None:
+        with open(b.path) as fh: old = fh.read()
+    else: old = b_text
+    form, extras = sections_to_form(parse_sections(old))
+    form["requisites"] = ", ".join(split_names(form["requisites"]) + [a.job])
+    feeding = [q for n in b.requisites for q in related(b, n, reports, sources) if b.istate in (q.fstate, geometry_state(q))]
+    start = geometry_state(a)
+    if feeding:                                                                ## B already starts from another requisite's result: keep it
+        notes = [f"'{b.job}' will also wait for '{a.job}' (requisite). It keeps starting from '{b.istate}', the result of '{feeding[0].job}': a job reads one state."]
+        form["istate"], form["fstate"] = b.istate, b.fstate
+        updates_own = False
+    else:
+        notes = [f"'{b.job}' will start only after '{a.job}' has finished (requisite), and from the state '{start}' (it read '{b.istate}' before)."]
+        if start != a.fstate: notes.append(f"'{a.job}' writes its results into '{a.fstate}', a state without a geometry, so '{b.job}' starts from '{start}', the geometry '{a.job}' used.")
+        ## B adds its results to the state it starts from when it already did so, or when it is a freq job still writing SCOPE's default
+        ## state (its own name): frequencies belong on the geometry they were computed for (thermochemistry needs both on one state)
+        updates_own = b.comp_type not in GEOMETRY_TYPES and (b.fstate == b.istate or (b.comp_type == "freq" and b.fstate == b.job))
+        form["istate"] = start
+        form["fstate"] = start if updates_own else b.fstate
+    if updates_own and b.fstate != start: notes.append(f"'{b.job}' adds its results to the state it reads, so it now writes into '{start}' too.")
+    if not feeding and b.istate != "initial" and b.istate != start: notes.append(f"Its previous initial state '{b.istate}' is replaced.")
+    if "#" in old: notes.append("Comments in the file are not kept (the file is written again from its settings).")
+    new = render_sections(build_sections(**form, extras=extras))
+    check = read_input_text(new)
+    if not check.ok: raise ValueError(f"SCOPE would not accept the changed file: {check.error}")
+    return Link(b.path, old, new, notes)
+
+def chain_order(reports: list, sources: "list | None"=None) -> list:
+    """A proposed order for jobs to chain: jobs already linked keep their order in the pipeline (column of the graph); otherwise the
+    order of the table, which is the order the files were added."""
+    nodes, edges, _ = build_graph(reports, sources); place = layout_graph(nodes, edges)
+    return [r for _, _, r in sorted((place.get(r.node, (0, 0))[0], i, r) for i, r in enumerate(reports))]
+
+def link_chain(chain: list, reports: list, sources: "list | None"=None) -> list:
+    """Links jobs in sequence: each waits for the one before it and starts from its result (A → B → C …), with the checks of link_jobs
+    for every pair. Files are changed in memory one after another, so a later link sees the earlier ones (a cycle through the chain is
+    refused too). Returns one Link per changed file, in chain order; nothing is written. Raises ValueError naming the pair that cannot be linked."""
+    if len(chain) < 2: raise ValueError("Choose at least two jobs to chain.")
+    if len({r.path for r in chain}) != len(chain): raise ValueError("A job appears twice in the chain.")
+    current = {r.path: r for r in reports}; texts, links = {}, {}
+    for a, b in zip(chain, chain[1:]):
+        a, b = current[a.path], current[b.path]
+        if a.job in b.requisites and b.branch == a.branch: continue                  ## already linked: nothing to change for this pair
+        try: change = link_jobs(a, b, list(current.values()), sources, texts.get(b.path))
+        except ValueError as exc: raise ValueError(f"'{a.job}' → '{b.job}': {exc}")
+        first = links.get(b.path)
+        links[b.path] = Link(b.path, first.old_text if first else change.old_text, change.new_text, (first.notes if first else []) + change.notes)
+        texts[b.path] = change.new_text
+        updated = read_input_text(change.new_text); updated.path = b.path; current[b.path] = updated
+    return [links[r.path] for r in chain if r.path in links]
 
 def form_problems(branch: str, job: str, workflow: str, procs: int, requisites: str="") -> list:
     """Checks that SCOPE's own validation does not cover: names used for folders and files, an empty workflow, and a job that requires itself."""
@@ -391,11 +557,17 @@ def validate_form(**values) -> tuple:
     problems = form_problems(values["branch"], values["job"], values["workflow"], values["procs"], values.get("requisites", ""))
     return text, read_input_text(text), problems
 
-def build_graph(reports: list) -> tuple:
+def related(r: InputReport, name: str, reports: list, sources: "list | None"=None) -> list:
+    """The loaded jobs that `name` in r's requisites or constrains can mean: same branch, that job name, and a workflow that can pick a
+    source r also runs on. SCOPE checks requisites inside one Workflow (one source), so a job of another workflow never counts."""
+    return [q for q in reports if q.ok and q is not r and q.branch == r.branch and q.job == name and selectors_overlap(q.selectors, r.selectors, sources) is not False]
+
+def build_graph(reports: list, sources: "list | None"=None) -> tuple:
     """Builds the pipeline graph from valid input reports.
 
-    Nodes are 'branch/job'. Edges are (from, to, kind): kind 'requisite' (from must finish before to) or 'constrain'
-    (from blocks to). Names that no loaded file defines are added as nodes with kind 'missing'.
+    Nodes are 'branch/workflow/job' (InputReport.node). Edges are (from, to, kind): kind 'requisite' (from must finish before to) or
+    'constrain' (from blocks to), drawn only between jobs whose workflows can share a source. Names that no loaded file defines are
+    added as nodes with kind 'missing'. `sources` (the source names of the chosen system) makes the workflow overlap exact.
 
     Returns:
         tuple: (nodes, edges, cycles). nodes is a dict node -> kind ('job' or 'missing'); cycles is a list of cycles.
@@ -408,43 +580,121 @@ def build_graph(reports: list) -> tuple:
         for kind, names in (("requisite", r.requisites), ("constrain", r.constrains)):
             for name in names:
                 if name == "self" or name == r.job: continue
-                source = f"{r.branch}/{name}"
-                if source not in nodes: nodes[source] = "missing"
-                edges.append((source, r.node, kind))
+                found = related(r, name, reports, sources)
+                if not found:
+                    ghost = f"{r.branch}/{r.workflow_label}/{name}"
+                    nodes.setdefault(ghost, "missing"); found_nodes = [ghost]
+                else: found_nodes = list(dict.fromkeys(q.node for q in found))
+                edges += [(n, r.node, kind) for n in found_nodes if (n, r.node, kind) not in edges]
     graph = nx.DiGraph(); graph.add_nodes_from(nodes); graph.add_edges_from((a, b) for a, b, k in edges if k == "requisite")
     cycles = list(nx.simple_cycles(graph))
     return nodes, edges, cycles
 
-def pipeline_issues(reports: list) -> list:
+def state_graph(reports: list, sources: "list | None"=None) -> tuple:
+    """The pipeline as SCOPE's manuscript draws it: jobs and the States they read and write.
+
+    Returns (nodes, edges, cycles). nodes maps an id to (kind, label): kind 'job', 'missing' (a requisite no file defines), 'state' (written
+    by a loaded job) or 'given' (read but written by no loaded job: 'initial', or a state that must already be in the system). Edges are
+    (from, to, kind): 'reads' (state -> job, istate), 'writes' (job -> state, fstate), 'requisite' and 'constrain' (job -> job, timing only).
+    A state is one name on the sources of a workflow; readers are joined to the writer of that name whose workflow overlaps theirs.
+    """
+    jobs, edges, cycles = build_graph(reports, sources)
+    nodes = {n: (kind, n.rsplit("/", 1)[-1]) for n, kind in jobs.items()}
+    ok, writers = [r for r in reports if r.ok], {}
+    for r in ok:
+        if r.fstate == r.istate: continue                                     ## adds results to the state it reads: drawn as 'updates' below
+        sid = f"state:{r.workflow_label}:{r.fstate}"; nodes[sid] = ("state", r.fstate)
+        writers.setdefault(r.fstate, []).append((r, sid)); edges.append((r.node, sid, "writes"))
+    for r in ok:
+        found = [sid for w, sid in writers.get(r.istate, []) if w is not r and selectors_overlap(w.selectors, r.selectors, sources) is not False]
+        if not found:
+            sid = f"state:given:{r.istate}"                                   ## one pill per name ('initial' is where every source starts)
+            if sid not in nodes: nodes[sid] = ("given", r.istate)
+            found = [sid]
+        for sid in dict.fromkeys(found):
+            edges.append((sid, r.node, "reads"))
+            if r.fstate == r.istate: edges.append((r.node, sid, "updates"))  ## not a forward edge: the state stays left of the job
+    return nodes, edges, cycles
+
+def missing_requisite(r: InputReport, name: str, ok: list, sources: "list | None"=None) -> str:
+    """Why requisite `name` of r matches no loaded job, in the words a newcomer needs: a state name written where a job name belongs,
+    a job of another branch, or a job of other sources (SCOPE only waits for jobs of the same branch and the same source)."""
+    if name == r.fstate:
+        return (f"{r.node} requires '{name}', but that is the state this job writes itself, not a job. Requisites are JOB names (the job to wait for); "
+                "states go in istate/fstate. Leave requisites empty if nothing must finish first.")
+    elsewhere = [q for q in ok if q is not r and q.job == name and q.branch != r.branch]          ## a job of that name first: a job's default state has the same name
+    if elsewhere:
+        q = elsewhere[0]
+        return (f"{r.node} requires '{name}', which is a job of branch '{q.branch}' ({os.path.basename(q.path)}), not of branch '{r.branch}'. SCOPE only waits for jobs of the same "
+                f"branch and the same source: put both jobs in one branch.")
+    writers = [q for q in ok if q is not r and q.fstate == name and not any(x.job == name for x in ok)]
+    if writers:
+        w = writers[0]
+        return (f"{r.node} requires '{name}', but that is a state (written by job '{w.job}' in {os.path.basename(w.path)}), not a job. Requisites are JOB names: "
+                f"write requisites = ['{w.job}'] and istate = '{name}' to start from its result.")
+    other = [q for q in ok if q is not r and q.job == name and q.branch == r.branch]
+    if other:
+        q = other[0]
+        return (f"{r.node} requires '{name}', but '{name}' runs on other sources ({q.workflow_label}) than this job ({r.workflow_label}). SCOPE only waits for a job of the same source: "
+                "make the workflows overlap.")
+    return f"{r.node} requires '{name}', which none of the loaded files defines for these sources. It must already exist in the system or this job never starts."
+
+def pipeline_issues(reports: list, sources: "list | None"=None) -> list:
     """Finds problems that only show when the input files are looked at together.
 
-    Returns a list of (path, message): a job that requires itself, a requisite no loaded file defines, two files that
-    define the same branch/job, and cycles of requisites. These are warnings: SCOPE itself accepts all of them.
+    Returns a list of (path, message): a job that requires itself, a requisite no loaded file defines, two files that define the same
+    job for the same sources, cycles of requisites, a job that waits for another one but reads a different state than the one it
+    writes, and two branches writing one state of the same sources. These are warnings: SCOPE itself accepts all of them.
     """
-    issues, seen = [], {}
-    nodes, edges, cycles = build_graph(reports)
-    for r in reports:
-        if not r.ok: continue
+    issues = []
+    nodes, edges, cycles = build_graph(reports, sources)
+    ok = [r for r in reports if r.ok]
+    for i, r in enumerate(ok):
         if r.job in [q.replace("-", "_").replace(" ", "_") for q in r.requisites]: issues.append((r.path, f"{r.node} lists itself as a requisite, so it would never start."))
-        if r.node in seen: issues.append((r.path, f"{r.node} is also defined in {os.path.basename(seen[r.node])}; the last file read wins."))
-        seen[r.node] = r.path
+        for q in ok[:i]:
+            if q.branch == r.branch and q.job == r.job and selectors_overlap(q.selectors, r.selectors, sources):
+                issues.append((r.path, f"{r.node} is also defined in {os.path.basename(q.path)} for the same sources ({q.workflow_label}); the last file read wins."))
         for name in r.requisites:
-            if name != r.job and f"{r.branch}/{name}" in nodes and nodes[f"{r.branch}/{name}"] == "missing": issues.append((r.path, f"{r.node} requires '{name}', which none of the loaded files defines. It must already exist in the system or this job never starts."))
+            if name == r.job: continue
+            found = related(r, name, reports, sources)
+            if not found: issues.append((r.path, missing_requisite(r, name, ok, sources))); continue
+            produced = {q.fstate for q in found} | {geometry_state(q) for q in found}
+            if r.istate not in produced and not any(r.istate in (x.fstate, geometry_state(x)) for n in r.requisites for x in related(r, n, reports, sources)):
+                state = geometry_state(found[0])
+                issues.append((r.path, f"{r.node} waits for '{name}' (which writes state '{state}') but reads state '{r.istate}'. Requisites only decide WHEN a job starts, not which geometry it uses: set istate = '{state}' to start from the result of '{name}'."))
+        if r.istate != "initial" and not any(q.fstate == r.istate and selectors_overlap(q.selectors, r.selectors, sources) is not False for q in ok if q is not r):
+            issues.append((r.path, f"{r.node} reads state '{r.istate}', which none of the loaded jobs writes. It must already exist in the system, or the job waits."))
+        for q in ok[:i]:
+            if q.branch != r.branch and q.fstate == r.fstate and selectors_overlap(q.selectors, r.selectors, sources):
+                issues.append((r.path, f"{r.node} and {q.node} (in {os.path.basename(q.path)}) both write state '{r.fstate}' of the same sources. States belong to the source, not to the branch, so one overwrites the other: give one of them another fstate."))
     for cycle in cycles: issues.append(("", "Cycle of requisites: " + " -> ".join(cycle) + ". None of these jobs can start."))
     return issues
 
+FORWARD = ("requisite", "reads", "writes")                         ## edges that place their end to the right of their start
+
 def layout_graph(nodes: dict, edges: list) -> dict:
-    """Assigns each node a (column, row): column is the longest chain of requisites before it, rows are numbered per column."""
+    """Assigns each node a (column, row): column is the longest chain of requisites (and, in a state graph, of reads and writes) before it, rows are numbered per column."""
     depth = {n: 0 for n in nodes}
     for _ in range(len(nodes)):                                   ## bounded relaxation: stays finite even if there is a cycle
         changed = False
         for a, b, kind in edges:
-            if kind == "requisite" and depth[b] < depth[a] + 1: depth[b] = depth[a] + 1; changed = True
+            if kind in FORWARD and depth[b] < depth[a] + 1: depth[b] = depth[a] + 1; changed = True
         if not changed: break
-    rows, place = {}, {}
-    for n in sorted(nodes, key=lambda n: (depth[n], n)):
-        place[n] = (depth[n], rows.get(depth[n], 0)); rows[depth[n]] = rows.get(depth[n], 0) + 1
-    return place
+    ## rows: each column is ordered by the mean row of the nodes it is linked to (barycentre method, a few sweeps left to right and back),
+    ## so a job sits next to the states it reads and writes and arrows rarely cross; ties are broken by name
+    cols = {}
+    for n in sorted(nodes, key=lambda n: (depth[n], n)): cols.setdefault(depth[n], []).append(n)
+    pos = {n: i for c in cols.values() for i, n in enumerate(c)}
+    linked = [(a, b) for a, b, kind in edges if kind in FORWARD + ("constrain", "updates") and a in depth and b in depth and depth[a] != depth[b]]
+    before = {n: [a if depth[a] < depth[b] else b for a, b in linked if n in (a, b) and max(depth[a], depth[b]) == depth[n]] for n in nodes}
+    after  = {n: [b if depth[a] < depth[b] else a for a, b in linked if n in (a, b) and min(depth[a], depth[b]) == depth[n]] for n in nodes}
+    for sweep in range(4):
+        forward = sweep % 2 == 0; near = before if forward else after
+        for c in sorted(cols, reverse=not forward):
+            mean = lambda n: sum(pos[m] for m in near[n]) / len(near[n]) if near[n] else pos[n]
+            cols[c].sort(key=lambda n: (mean(n), n))
+            for i, n in enumerate(cols[c]): pos[n] = i
+    return {n: (depth[n], pos[n]) for n in nodes}
 
 ###########
 ### Run ###
@@ -476,6 +726,49 @@ def queue_problems(info: EnvInfo, reports: list) -> list:
     """
     if info is None or info.scheduler == "local": return []
     return [f"{os.path.basename(r.path)}: queue '{q}' is not one of {info.queues}" for r in reports if r.ok for q in r.queues if q not in info.queues]
+
+@dataclass
+class ReviewRow:
+    """One job as it will run, for the review table shown where Run is pressed.
+
+    Attributes:
+        level (str):     'ok', 'warn' (look at it) or 'err' (it will not run as meant).
+        problems (list): Plain sentences; the first is shown in the table, all in the tooltip.
+    """
+    file:      str
+    job:       str
+    where:     str
+    kind:      str
+    states:    str
+    waits_for: str
+    procs:     str
+    queue:     str
+    submits:   str
+    level:     str
+    problems:  list
+
+def review_rows(reports: list, scheduler: str="", queues: "list | None"=None, sources: "list | None"=None, extra: "dict | None"=None) -> list:
+    """Every input file as it will run, with what needs a look, for the review before Run (here or on a cluster).
+
+    scheduler and queues are those of the environment that runs the jobs ('' and None when unknown, for instance a cluster not tested
+    yet). extra maps a file path to more messages (missing software on the cluster). Queue names are checked exactly (SCOPE would ask a
+    question on a near match, which a run started by this window cannot answer); want_submit is shown as what it will do there."""
+    issues = {}
+    for path, message in pipeline_issues(reports, sources): issues.setdefault(path, []).append(message)
+    rows = []
+    for r in reports:
+        name = os.path.basename(r.path)
+        if not r.ok:
+            rows.append(ReviewRow(name, "", "", "", "", "", "", "", "", "err", [f"SCOPE does not accept this file: {r.error}"])); continue
+        errs, warns = [], list(issues.get(r.path, [])) + list((extra or {}).get(r.path, []))
+        if scheduler and scheduler != "local" and queues is not None:
+            errs += [f"Queue '{q}' is not a queue of this environment ({', '.join(queues) or 'none'}): SCOPE would stop to ask, and the run cannot answer." for q in r.queues if q not in queues]
+        if not scheduler: submits = "yes" if r.want_submit else "no"
+        elif scheduler == "local": submits = "no (local: nothing is submitted)"
+        else: submits = "YES, to " + scheduler if r.want_submit else "no (want_submit = False)"
+        rows.append(ReviewRow(name, r.job, f"{r.branch} · {r.workflow_label}", f"{r.software} {r.comp_type}", f"{r.istate} → {r.fstate}", ", ".join(r.requisites) or "—",
+                              str(r.procs), ", ".join(r.queues) or "—", submits, "err" if errs else ("warn" if warns else "ok"), errs + warns))
+    return rows
 
 def submission_warning(info: EnvInfo, reports: list) -> str:
     """Returns a warning if running these inputs on this environment can submit jobs, or '' otherwise.
@@ -608,6 +901,12 @@ def detect_local_scope(python: str=None, timeout: int=60) -> LocalScope:
 EXIT_MARKER = "__SCOPE_GUI_EXIT__"
 WRAPPER     = 'log="$1"; shift; "$@" > "$log" 2>&1 < /dev/null; code=$?; echo "__SCOPE_GUI_EXIT__ $code" >> "$log"'
 
+def unique_stamp() -> str:
+    """'YYYYmmdd_HHMMSS_<6 hex>': a time stamp that two runs (or backups) started in the same second never share, even from two projects
+    with a system of the same name. Names built from it still start with the date and time, so they sort by time."""
+    import time, uuid
+    return f"{time.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
+
 def runs_dir() -> str:
     """Folder with the logs and the records of runs started from the GUI (next to the GUI preferences)."""
     from platformdirs import user_config_dir
@@ -649,8 +948,9 @@ def start_detached_local(env_path: str, system: str, inputs: list, quiet: bool=F
     """
     import subprocess, time
     program, args = build_run_command(env_path, system, inputs, quiet, verbose, errors)
-    stamp = time.strftime("%Y%m%d_%H%M%S")
+    stamp = unique_stamp()
     log   = os.path.join(runs_dir(), f"run_{system}_{stamp}.log")
+    open(log, "x").close()                                                  ## created exclusively: a name already used fails here, never shared by two runs
     proc  = subprocess.Popen(["bash", "-c", WRAPPER, "_", log, program, *args], start_new_session=True, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=child_environment())
     record = {"id": f"{stamp}_{system}", "kind": "local", "system": system, "env": os.path.abspath(env_path), "pid": proc.pid, "log": log, "started": time.time(), "seen": False, "command": "scope " + " ".join(args[2:])}
     update_runs(lambda records: records.append(record))

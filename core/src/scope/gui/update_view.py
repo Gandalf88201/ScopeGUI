@@ -13,7 +13,7 @@ class UpdatesDialog(QDialog):
     """
     def __init__(self, parent, window):
         super().__init__(parent); self.window_ = window
-        self.setWindowTitle("SCOPE updates"); self.resize(820, 560)
+        self.setWindowTitle("SCOPE updates"); theme.fit(self, 820, 560)
         self.head = QLabel(); self.head.setTextFormat(Qt.RichText); self.head.setWordWrap(True); self.head.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self.auto = QCheckBox("Check for updates once a day (asks GitHub what is new; your files are not changed)")
         self.auto.setToolTip("Runs git fetch in the SCOPE folder at most once a day. Nothing is downloaded into your files until you press Update.")

@@ -61,10 +61,10 @@ class RemoteTab(QWidget):
         self.bridge = LoginBridge(self)
         self.refresh_timer = QTimer(self); self.refresh_timer.setSingleShot(True); self.refresh_timer.setInterval(500); self.refresh_timer.timeout.connect(self.refresh_connection)
         self.profiles = remote.load_profiles()
-        self.chooser  = QComboBox(); self.chooser.setMinimumWidth(180)
+        self.chooser  = QComboBox(); self.chooser.setMinimumWidth(140)
         self.new_btn, self.delete_btn, self.save_btn = QPushButton("New"), QPushButton("Delete"), QPushButton("Save profile")
         self.name, self.scope_bin, self.activate, self.root, self.env_file = QLineEdit(), QLineEdit(), QLineEdit(), QLineEdit(), QLineEdit()
-        self.host = QComboBox(); self.host.setEditable(True); self.host.addItems(remote.list_ssh_hosts()); self.host.setEditText("")
+        self.host = QComboBox(); self.host.setEditable(True); self.host.setMinimumContentsLength(16); self.host.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon); self.host.addItems(remote.list_ssh_hosts()); self.host.setEditText("")
         self.host.lineEdit().setPlaceholderText("login.cluster.org, an alias from ~/.ssh/config, or paste your ssh command (ssh -p 2122 you@login.cluster.org)")
         self.host.setToolTip("The machine you log in to. You can paste the whole command you use in the Terminal: the user name and the port are moved to their own fields.")
         self.user, self.port = QLineEdit(), QLineEdit(); self.port.setMaximumWidth(120)
@@ -77,6 +77,10 @@ class RemoteTab(QWidget):
         self.conn_badge = QLabel(); self.connect_btn, self.disconnect_btn = QPushButton("Connect…"), QPushButton("Disconnect")
         self.terminal_btn, self.test_btn = QPushButton("Terminal command…"), QPushButton("Test connection"); self.connect_btn.setProperty("primary", True)
         self.connect_btn.setToolTip("Log in to the cluster. If it asks for a password or a verification code, you answer in a window. The answer goes to the cluster only; it is not stored.\nThe connection then stays open for 4 hours and every button of this page uses it.")
+        if not remote.shares_connection():                                   ## Windows: no shared connection and no password window; every command logs in with a key
+            self.connect_btn.setText("Set up key login…"); self.terminal_btn.setText("Commands to do it yourself…"); self.disconnect_btn.hide()
+            self.connect_btn.setToolTip("On Windows each command logs in on its own, so the cluster must accept a key from this computer. This opens a console window that creates a key if you have none\n"
+                                        "and adds it to the cluster (you type the cluster password there, once). Nothing is stored by this window.")
         self.disconnect_btn.setToolTip("Close the shared connection. A run already started on the cluster keeps going."); self.test_btn.setToolTip("Check, without changing anything, that SCOPE, the project and the software are in place on the cluster.")
         self.terminal_btn.setToolTip("The same connection can be opened in the Terminal app. Use it if you prefer to type the password there, or if Connect… does not work on this computer.")
         self.adv_btn = QPushButton("▸  Advanced: start scope with a line instead of a path"); self.adv_btn.setObjectName("linkbtn"); self.adv_btn.setCheckable(True); self.adv_btn.setCursor(Qt.PointingHandCursor)
@@ -95,9 +99,9 @@ class RemoteTab(QWidget):
         self.hint = QLabel(); self.hint.setWordWrap(True)
         self.lights = remote.unchecked_lights(); self.checked_at = ""
         self.lights_row = QHBoxLayout(); self.lights_title = QLabel("On the cluster:"); self.lights_row.addWidget(self.lights_title)
-        self.light_labels = [QLabel() for _ in range(3)]; [self.lights_row.addWidget(l) for l in self.light_labels]; self.lights_row.addStretch(1); self.when = QLabel(); self.when.setObjectName("pagesub"); self.lights_row.addWidget(self.when)
+        self.light_labels = [QLabel() for _ in range(3)]; [l.setWordWrap(True) for l in self.light_labels]; [self.lights_row.addWidget(l) for l in self.light_labels]; self.lights_row.addStretch(1); self.when = QLabel(); self.when.setObjectName("pagesub"); self.lights_row.addWidget(self.when)
 
-        ##### layout: one card per topic #####
+        ##### layout: three cards, in the order of use: the cluster account, this workspace's project, then transfer and run #####
         def field(label: str, widget, left: bool=False) -> QVBoxLayout:
             box = QVBoxLayout(); box.setSpacing(3); caption = QLabel(label); caption.setObjectName("pagesub"); box.addWidget(caption)
             box.addWidget(widget, 0, Qt.AlignLeft) if left else box.addWidget(widget)
@@ -105,33 +109,49 @@ class RemoteTab(QWidget):
         def card(title: str) -> tuple:
             frame = QFrame(); frame.setObjectName("card"); inner = QVBoxLayout(frame); inner.setContentsMargins(16, 8, 16, 14); inner.setSpacing(8)
             head = QLabel(title); head.setObjectName("sectiontitle"); inner.addWidget(head); return frame, inner
-        intro = QLabel("SCOPE runs on the cluster; this window starts it over SSH and moves files with rsync. Your SSH setup (keys, ~/.ssh/config) is used as it is. If the cluster asks for a password or a verification code, press Connect…: you answer in a window, and the answer is sent to the cluster and never stored. Nothing is sent until you press a button.")
+        intro = QLabel("SCOPE runs on the cluster; this window starts it over SSH and copies files. Nothing is sent until you press a button, and no password is stored.")
         intro.setWordWrap(True); intro.setObjectName("pagesub")
 
-        conn, cl = card("1 · Connection")
-        top = QHBoxLayout(); top.addWidget(QLabel("Profile")); top.addWidget(self.chooser); top.addWidget(self.new_btn); top.addWidget(self.delete_btn); top.addStretch(1); top.addWidget(self.conn_badge); cl.addLayout(top)
+        ## 1 · the cluster account: one line when the saved profile is complete; its fields only while editing
+        conn, cl = card("1 · Cluster")
+        self.edit_btn = QPushButton("Edit…"); self.edit_btn.setCheckable(True); self.edit_btn.setToolTip("Show the fields of this connection (host, user, port, where scope is).")
+        top = QHBoxLayout(); top.addWidget(QLabel("Profile")); top.addWidget(self.chooser); top.addWidget(self.edit_btn); top.addWidget(self.new_btn); top.addWidget(self.delete_btn); top.addStretch(1); top.addWidget(self.conn_badge); cl.addLayout(top)
+        self.summary = QLabel(); self.summary.setObjectName("pagesub"); self.summary.setWordWrap(True); cl.addWidget(self.summary)
+        actions = QHBoxLayout(); [actions.addWidget(b) for b in (self.connect_btn, self.disconnect_btn, self.test_btn)]; actions.addStretch(1); cl.addLayout(actions)
+        cl.addLayout(self.lights_row)
+        self.details_btn = QPushButton("▸  Details of the last test"); self.details_btn.setObjectName("linkbtn"); self.details_btn.setCheckable(True); self.details_btn.setCursor(Qt.PointingHandCursor)
+        self.details_btn.toggled.connect(lambda on: (self.table.setVisible(on), self.details_btn.setText(("▾" if on else "▸") + "  Details of the last test")))
+        self.details_btn.hide(); self.table.hide(); cl.addWidget(self.details_btn); cl.addWidget(self.table)
+        self.profile_box = QWidget(); pb = QVBoxLayout(self.profile_box); pb.setContentsMargins(0, 4, 0, 0); pb.setSpacing(8)
         grid = QGridLayout(); grid.setHorizontalSpacing(14); grid.setVerticalSpacing(8); grid.setColumnStretch(0, 2); grid.setColumnStretch(1, 3)
-        grid.addLayout(field("Profile name", self.name), 0, 0); grid.addLayout(field("SSH host", self.host), 0, 1); grid.addLayout(field("User", self.user), 1, 0); grid.addLayout(field("Port", self.port, left=True), 1, 1); cl.addLayout(grid)
-        actions = QHBoxLayout(); [actions.addWidget(b) for b in (self.connect_btn, self.disconnect_btn, self.test_btn)]; actions.addStretch(1); actions.addWidget(self.terminal_btn); actions.addWidget(self.save_btn); cl.addLayout(actions)
+        grid.addLayout(field("Profile name", self.name), 0, 0); grid.addLayout(field("SSH host", self.host), 0, 1); grid.addLayout(field("User", self.user), 1, 0); grid.addLayout(field("Port", self.port, left=True), 1, 1); pb.addLayout(grid)
+        pb.addLayout(field("Path of scope on the cluster", self.scope_bin)); pb.addWidget(self.adv_btn, 0, Qt.AlignLeft)
+        self.adv_box = QWidget(); ab = QVBoxLayout(self.adv_box); ab.setContentsMargins(0, 0, 0, 0); ab.addLayout(field("…or a line that makes it available  (used only when the path is empty)", self.activate)); self.adv_box.setVisible(False); pb.addWidget(self.adv_box)
+        save_row = QHBoxLayout(); save_row.addWidget(self.terminal_btn); save_row.addStretch(1); save_row.addWidget(self.save_btn); pb.addLayout(save_row)
+        self.profile_box.setVisible(False); cl.addWidget(self.profile_box)
+        self.edit_btn.toggled.connect(self.profile_box.setVisible)
 
-        program, pl = card("2 · SCOPE on the cluster")
-        pl.addLayout(field("Path of scope on the cluster", self.scope_bin)); pl.addWidget(self.adv_btn, 0, Qt.AlignLeft)
-        self.adv_box = QWidget(); ab = QVBoxLayout(self.adv_box); ab.setContentsMargins(0, 0, 0, 0); ab.addLayout(field("…or a line that makes it available  (used only when the path is empty)", self.activate)); self.adv_box.setVisible(False); pl.addWidget(self.adv_box); pl.addStretch(1)
+        ## 2 · this workspace's project on the cluster
+        project, jl = card("2 · Project on the cluster  (this workspace)")
+        prow = QHBoxLayout(); prow.setSpacing(12); prow.addLayout(field("Project folder on the cluster", self.root), 1); prow.addLayout(field("Cluster environment file", self.env_file), 1); jl.addLayout(prow); jl.addWidget(self.hint)
 
-        project, jl = card("3 · Project on the cluster  (this workspace)")
-        jl.addLayout(field("Project folder on the cluster", self.root)); jl.addLayout(field("Cluster environment file", self.env_file)); jl.addStretch(1)
-        middle = QHBoxLayout(); middle.setSpacing(12); middle.addWidget(program, 1); middle.addWidget(project, 1)
-
-        checks, kl = card("Status and checks")
-        kl.addLayout(self.lights_row); kl.addWidget(self.status); kl.addWidget(self.table, 1)
-        work, wl = card("Transfer and run")
-        row2 = QHBoxLayout(); row2.addWidget(QLabel("System")); row2.addWidget(self.system); [row2.addWidget(b) for b in (self.pre_up, self.up, self.down)]; row2.addStretch(1)
-        row3 = QHBoxLayout(); [row3.addWidget(b) for b in (self.run_btn, self.watch_btn, self.unwatch_btn, self.stopcl_btn)]; row3.addStretch(1)
-        wl.addLayout(row2); wl.addLayout(row3); wl.addWidget(self.log, 1)
-        split = QSplitter(Qt.Vertical); split.addWidget(checks); split.addWidget(work); split.setStretchFactor(0, 1); split.setStretchFactor(1, 1); split.setSizes([280, 320]); split.setChildrenCollapsible(False)
-        self.table.setMinimumHeight(150); self.log.setMinimumHeight(140); self.setMinimumHeight(980)
-        lay = QVBoxLayout(self); lay.setSpacing(12); lay.addWidget(intro); lay.addWidget(conn); lay.addLayout(middle); lay.addWidget(self.hint); lay.addWidget(split, 1)
-        chain = (self.chooser, self.new_btn, self.delete_btn, self.name, self.host, self.user, self.port, self.connect_btn, self.disconnect_btn, self.test_btn, self.terminal_btn, self.save_btn, self.scope_bin, self.adv_btn, self.activate, self.root, self.env_file)
+        ## 3 · transfer and run
+        work, wl = card("3 · Transfer and run")
+        self.system.setMinimumWidth(120); self.system.setMinimumContentsLength(10); self.system.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        row2 = QHBoxLayout(); row2.addWidget(QLabel("System")); row2.addWidget(self.system, 1); [row2.addWidget(b) for b in (self.up, self.down)]
+        row3 = QHBoxLayout(); [row3.addWidget(b) for b in (self.run_btn, self.watch_btn, self.stopcl_btn)]; row3.addStretch(1)
+        self.pre_up.hide(); self.unwatch_btn.hide()                          ## Upload already shows what it would copy and asks; following a run stops by itself
+        self.up.setToolTip("Shows what would be copied (system, input files, and calculation files only here), then asks before copying.")
+        sync = QLabel("Keep the input and output files in step wherever the system runs: the system file only records what SCOPE read from them, so copying the .npy alone is not enough. "
+                      "Branches, or workflows (sources), can run on different clusters; the jobs of one workflow belong in one place.")
+        sync.setWordWrap(True); sync.setObjectName("pagesub")
+        from scope.gui.review_view import ReviewTable
+        self.review = ReviewTable(); self.review.setMinimumHeight(110); self.review_note = QLabel(); self.review_note.setWordWrap(True); self.probe = {}
+        wl.addLayout(row2); wl.addLayout(row3); wl.addWidget(QLabel("Review: every input file as it will run on the cluster")); wl.addWidget(self.review); wl.addWidget(self.review_note); wl.addWidget(self.log, 1); wl.addWidget(sync)
+        self.log.setMinimumHeight(160); self.table.setMinimumHeight(120)
+        self.status.setObjectName("statusline")                                    ## the result of the last button, at the top of the page so it is always in view
+        lay = QVBoxLayout(self); lay.setSpacing(12); lay.addWidget(intro); lay.addWidget(self.status); lay.addWidget(conn); lay.addWidget(project); lay.addWidget(work, 1)
+        chain = (self.chooser, self.edit_btn, self.new_btn, self.delete_btn, self.connect_btn, self.disconnect_btn, self.test_btn, self.name, self.host, self.user, self.port, self.scope_bin, self.adv_btn, self.activate, self.terminal_btn, self.save_btn, self.root, self.env_file)
         for a, b in zip(chain, chain[1:]): QWidget.setTabOrder(a, b)
 
         for edit in (self.name, self.user, self.port, self.scope_bin, self.activate, self.root, self.env_file): edit.textChanged.connect(self.update_hint)
@@ -144,7 +164,7 @@ class RemoteTab(QWidget):
         self.pre_up.clicked.connect(lambda: self.upload(preview=True)); self.up.clicked.connect(lambda: self.upload(preview=False)); self.run_btn.clicked.connect(self.run_remote)
         self.watch_btn.clicked.connect(self.watch_runs); self.unwatch_btn.clicked.connect(self.stop_watching); self.stopcl_btn.clicked.connect(self.stop_cluster_run)
         self.down.clicked.connect(lambda: self.open_download())
-        session.systemsChanged.connect(self.refresh_systems); session.envChanged.connect(self.refresh_systems); theme.on_change(self.render_checks); theme.on_change(self.render_lights)
+        session.systemsChanged.connect(self.refresh_systems); session.envChanged.connect(self.refresh_systems); session.inputsChanged.connect(self.update_review); theme.on_change(self.render_checks); theme.on_change(self.render_lights)
         self.reload_chooser(); self.refresh_systems(); self.update_hint(); self.render_lights(); self.update_connection_buttons()
 
     ##### profiles #####
@@ -222,6 +242,7 @@ class RemoteTab(QWidget):
         if problems: QMessageBox.warning(self, "Profile not saved", "\n".join(problems)); return False
         remote.save_profile(p, connection_only=True); self.profiles = remote.load_profiles()
         self.loading_project = True; self.reload_chooser(p.name); self.loading_project = False; self.projectChanged.emit()
+        self.edit_btn.setChecked(False)                                           ## saved and complete: back to one line (Edit… opens it again)
         self.status.setText(f"✓ Profile '{p.name}' saved. Next: Test connection."); set_kind(self.status, "ok"); return True
 
     def delete_profile(self) -> None:
@@ -237,11 +258,13 @@ class RemoteTab(QWidget):
     def show_terminal_command(self) -> None:
         p = self.current()
         if not p.host: QMessageBox.information(self, "No host", "Choose or type the SSH host first."); return
+        if not remote.shares_connection():
+            QMessageBox.information(self, "Key login by hand", "In PowerShell, run (answer the cluster password once):\n\n" + remote.key_setup_command(p) + "\n\nThen press Test connection."); return
         dialog = QDialog(self); dialog.setWindowTitle("Open a connection in the Terminal"); lay = QVBoxLayout(dialog)
         text = QLabel("Connect… does the same inside this window. If you prefer the Terminal, or Connect… does not work on this computer: run this command once in the Terminal app, answer the password or verification code there, and leave it. The connection stays open and this window reuses it:"); text.setWordWrap(True)
         box = QPlainTextEdit(remote.master_command(p)); box.setReadOnly(True); box.setMaximumHeight(70)
         copy = QPushButton("Copy"); copy.clicked.connect(lambda: QGuiApplication.clipboard().setText(box.toPlainText())); close = QPushButton("Close"); close.clicked.connect(dialog.accept)
-        row = QHBoxLayout(); row.addStretch(1); row.addWidget(copy); row.addWidget(close); lay.addWidget(text); lay.addWidget(box); lay.addLayout(row); dialog.resize(640, 220); dialog.exec()
+        row = QHBoxLayout(); row.addStretch(1); row.addWidget(copy); row.addWidget(close); lay.addWidget(text); lay.addWidget(box); lay.addLayout(row); theme.fit(dialog, 640, 220); dialog.exec()
 
     ##### the shared connection: Connect…, Disconnect, and what the page shows about it #####
     def show_advanced(self, on: bool) -> None:
@@ -250,13 +273,20 @@ class RemoteTab(QWidget):
     def refresh_connection(self) -> None:
         """Looks, on this computer only, whether a shared connection to the account in the form is open, and updates the badge and the buttons."""
         p = self.current(); self.alive = remote.connection_alive(p)
-        if self.alive: self.conn_badge.setText(f"●  Connected to {p.host}"); set_kind(self.conn_badge, "ok")
+        if not remote.shares_connection(): self.conn_badge.setText("key login (each command logs in)"); set_kind(self.conn_badge, "idle")
+        elif self.alive: self.conn_badge.setText(f"●  Connected to {p.host}"); set_kind(self.conn_badge, "ok")
         else: self.conn_badge.setText("○  Not connected"); set_kind(self.conn_badge, "idle")
-        self.update_connection_buttons()
+        self.update_connection_buttons(); self.update_summary()
+
+    def update_summary(self) -> None:
+        """One line that says which account the profile reaches; the fields open with Edit… (and by themselves while the profile is incomplete)."""
+        p = self.current(); incomplete = bool(remote.connection_problems(p))
+        who = (f"{p.user}@" if p.user else "") + (p.host or "?") + (f", port {p.port}" if p.port else "")
+        self.summary.setText("New connection: fill in the fields below and save." if not p.name and not p.host else f"{who} · scope: {p.scope_bin or p.activate or 'not set'}" + ("  (incomplete: see the fields)" if incomplete else ""))
+        if incomplete and not self.edit_btn.isChecked(): self.edit_btn.setChecked(True)
 
     def update_connection_buttons(self) -> None:
-        self.connect_btn.setEnabled(not self.busy and not self.alive and remote.can_login_here()); self.disconnect_btn.setEnabled(not self.busy and self.alive)
-        if not remote.can_login_here(): self.connect_btn.setToolTip("Connect… needs macOS or Linux. Use Terminal command… instead.")
+        self.connect_btn.setEnabled(not self.busy and (not self.alive or not remote.shares_connection())); self.disconnect_btn.setEnabled(not self.busy and self.alive)
 
     def ask_login(self, context: str, prompt: str, kind: str) -> "str | None":
         """Shows one question of ssh and returns the answer (None: cancelled). Runs in the GUI thread. The answer is passed on and not kept."""
@@ -272,6 +302,11 @@ class RemoteTab(QWidget):
         self.split_host(); p = self.current()
         problems = {k: v for k, v in remote.connection_problems(p).items() if k in ("host", "user", "port")}
         if problems: QMessageBox.warning(self, "Check the connection", "\n".join(f"{remote.FIELD_LABELS[k]}: {v}" for k, v in problems.items())); return
+        if not remote.shares_connection():
+            res = remote.open_key_setup(p)
+            if res.ok: self.log.appendPlainText(f"A console window opened to set up key login to {p.host}: answer there (the cluster password once). Then press Test connection."); self.status.setText("Finish the key setup in the console window, then press Test connection.")
+            else: self.log.appendPlainText("Could not open the console window: " + res.stderr); self.status.setText("Key setup could not start. Use Commands to do it yourself… instead.")
+            return
         self.refresh_connection()
         if self.alive: self.status.setText(f"Already connected to {p.host}."); return
         self.log.appendPlainText(f"$ {remote.ssh_display(p)}  (opens the shared connection; the cluster's questions are asked in a window, and nothing is stored)")
@@ -295,7 +330,8 @@ class RemoteTab(QWidget):
 
     def reconnect_hint(self, res: "remote.Result") -> str:
         """What to add to a message when a command failed only for want of a login."""
-        return " Press Connect… to log in again." if remote.auth_failed(res) else ""
+        if not remote.auth_failed(res): return ""
+        return " Press Connect… to log in again." if remote.shares_connection() else " The cluster refused this computer's key: press Set up key login…"
 
     def showEvent(self, event) -> None:
         super().showEvent(event); self.refresh_connection()
@@ -321,20 +357,22 @@ class RemoteTab(QWidget):
         def work():
             result = remote.run_script(p, remote.probe_script(p), timeout=90)
             from scope.gui import updates
-            return remote.evaluate_probe(p, result, getattr(scope, "__version__", ""), updates.local_commit()), remote.lights_from_probe(remote.parse_probe(result.stdout))
+            probe = remote.parse_probe(result.stdout)
+            return remote.evaluate_probe(p, result, getattr(scope, "__version__", ""), updates.local_commit()), remote.lights_from_probe(probe), probe
         self.background(work, self.show_checks, f"Testing {p.host}…")
 
     def render_lights(self) -> None:
         """Draws the three lights (SCOPE, Quantum ESPRESSO, Gaussian 16): green available, amber doubtful, red missing, grey not checked or not set."""
         c = theme.colors(); colour = {"green": c["ok"], "amber": c["warn"], "red": c["err"], "grey": c["sub"]}
         for label, light in zip(self.light_labels, self.lights):
-            label.setText(f'<span style="color:{colour[light.state]}; font-size:17px">●</span>&nbsp;<b>{light.name}</b>&nbsp;<span style="color:{c["sub"]}">{light.short}</span>&nbsp;&nbsp;')
+            label.setText(f'<span style="color:{colour[light.state]}; font-size:17px">●</span>&nbsp;<b>{light.name}</b> <span style="color:{c["sub"]}">{light.short}</span>&nbsp;&nbsp;')
             label.setToolTip(light.detail); label.setTextFormat(Qt.RichText)
         self.when.setText(f"checked {self.checked_at}" if self.checked_at else "")
 
     def show_checks(self, outcome) -> None:
-        checks, self.lights = outcome; self.checked_at = time.strftime("%H:%M:%S"); self.render_lights()
-        self.checks = checks; self.render_checks()
+        checks, self.lights = outcome[:2]; self.probe = outcome[2] if len(outcome) > 2 else {}; self.checked_at = time.strftime("%H:%M:%S"); self.render_lights(); self.update_review()
+        self.checks = checks; self.render_checks(); self.details_btn.setVisible(bool(checks))
+        self.details_btn.setChecked(any(c.status != "ok" for c in checks))       ## open when something needs a look
         failed = [c for c in checks if c.status == "fail"]; warned = [c for c in checks if c.status == "warn"]
         self.session.mark("cluster", not failed and bool(checks))
         if not failed and checks: self.announce_runs()
@@ -355,6 +393,16 @@ class RemoteTab(QWidget):
         current = self.system.currentText(); self.system.clear()
         self.system.addItems([r.name for r in self.session.systems() if r.file])
         if current: self.system.setCurrentText(current)
+        self.update_review()
+
+    def update_review(self) -> None:
+        """The review table with the cluster's scheduler and queues from the last Test connection (not checked before one)."""
+        env = (self.probe or {}).get("env") or {}
+        reports = self.session.reports
+        extra = {r.path: remote.unavailable_software(self.lights, [r]) for r in reports if r.ok}
+        self.review.show_rows(backend.review_rows(reports, env.get("scheduler", ""), env.get("queues") if env else None, None, extra))
+        note = self.review.summary() + ("" if env else "  Queues and submission are checked after Test connection.")
+        self.review_note.setText(note); set_kind(self.review_note, {"ok": "ok", "warn": "warn", "err": "err"}[self.review.level] if self.review.rows else "")
 
     def need(self) -> "tuple | None":
         p = self.valid_profile()
@@ -377,22 +425,43 @@ class RemoteTab(QWidget):
             total += len(lines) if res.ok else 0
         return total
 
+    def source_checks(self, info, system: str, reports: list) -> list:
+        """Charge and spin of the sources that need a look: on a cluster they go into the Gaussian and QE inputs SCOPE writes."""
+        from scope.gui import systems
+        return systems.run_checks(os.path.join(info.systems_path, system, f"{system}.npy"), sorted({r.software for r in reports if r.ok}))
+
     def upload(self, preview: bool) -> None:
         got = self.need()
         if not got: return
         p, info, system = got; inputs = [r.path for r in self.session.reports if r.ok]
         if not self.unique_inputs(inputs): return
         items = remote.upload_items(p, info, system, inputs)
+        from scope.gui import transfer
         def work():
             made = remote.run_script(p, remote.remote_dirs_script(p, system))
-            return (made, remote.sync(items, dry_run=True, p=p)) if made.ok else (made, [])
+            if not made.ok: return made, [], None
+            listing = transfer.parse_listing(remote.run_script(p, transfer.listing_script(p, system), timeout=120).stdout)
+            return made, remote.sync(items, dry_run=True, p=p), (transfer.upload_check(listing, info, system) if listing else None)
         def done(result):
-            made, dry = result
+            made, dry, check = result
             if not made.ok: self.log.appendPlainText("Cannot prepare the folders on the cluster: " + (made.stderr.strip() or f"exit code {made.returncode}")); self.status.setText("Upload not possible." + self.reconnect_hint(made)); return
-            n = self.show_sync(dry, "Would copy"); self.status.setText(f"Preview: {n} change(s). Nothing was copied.")
-            if preview or n == 0: return
-            if QMessageBox.question(self, "Upload", f"Copy {n} change(s) to {p.host}:{p.remote_root}?\n\nSystem '{system}' and {len(inputs)} input file(s). Existing files with the same name are replaced; nothing is deleted.") != QMessageBox.Yes: return
-            self.background(lambda: remote.sync(items, dry_run=False, p=p), lambda r: (self.show_sync(r, "Copied"), self.status.setText("Upload finished.")), "Uploading…")
+            n = self.show_sync(dry, "Would copy"); warnings = check.messages if check else ["The cluster folder could not be listed, so the synchronisation could not be checked."]
+            warnings = warnings + self.source_checks(info, system, self.session.reports)
+            for w in warnings: self.log.appendPlainText("Synchronisation: " + w)
+            if check and check.only_here: self.log.appendPlainText("    " + "\n    ".join(check.only_here[:40]) + (f"\n    … and {len(check.only_here) - 40} more" if len(check.only_here) > 40 else ""))
+            self.status.setText(f"Preview: {n} change(s)" + (f", {len(check.only_here)} calculation file(s) only here" if check and check.only_here else "") + ". Nothing was copied.")
+            if preview or (n == 0 and not (check and check.only_here)): return
+            text = f"Copy {n} change(s) to {p.host}:{p.remote_root}?\n\nSystem '{system}' and {len(inputs)} input file(s). Existing files with the same name are replaced; nothing is deleted."
+            if warnings: text += "\n\nCheck first:\n• " + "\n• ".join(warnings)
+            if QMessageBox.question(self, "Upload", text) != QMessageBox.Yes: return
+            files = check.only_here if check and check.only_here and QMessageBox.question(self, "Upload the calculation files too?",
+                        f"Also copy the {len(check.only_here)} input and output file(s) that are only here (or newer here) into Computations/{system} on the cluster?\n\n"
+                        "Recommended: the cluster's SCOPE reads, continues and checks calculations from these files; the system file alone is not enough.") == QMessageBox.Yes else []
+            def copy():
+                out = remote.sync(items, dry_run=False, p=p)
+                if files: out.append(("calculation files", transfer.push_files(p, info, system, files), list(files)))
+                return out
+            self.background(copy, lambda r: (self.show_sync(r, "Copied"), self.status.setText("Upload finished.")), "Uploading…")
         self.background(work, done, "Checking what would be copied…")
 
     def open_download(self, system: str=None, wanted: list=None) -> "object | None":
@@ -419,14 +488,31 @@ class RemoteTab(QWidget):
         if self.shared: note += f"\n\nThis project folder is also used by workspace(s): {', '.join(self.shared)}."
         missing = remote.unavailable_software(self.lights, valid)
         if missing: note += "\n\nWARNING from the last connection test:\n" + "\n".join(missing)
+        self.update_review()
+        if self.review.level != "ok": note += "\n\nReview table: " + self.review.summary() + " Hover over its Check column for the details."
+        checks = self.source_checks(info, system, valid)
+        if checks: note += "\n\nCharge and spin (of this computer's system file, as uploaded):\n• " + "\n• ".join(checks[:6]) + ("\n• …" if len(checks) > 6 else "")
         if QMessageBox.question(self, "Run on the cluster", f"Start `scope run` for '{system}' on {p.host}, with the files uploaded in {p.remote_root}/inputs.\n\nThe run is detached: it keeps going on the cluster if you close this window or lose the connection.{note}") != QMessageBox.Yes: return
-        script = remote.detached_run_script(p, system, [f"{p.remote_root.rstrip('/')}/inputs/{os.path.basename(r.path)}" for r in valid])
+        script = remote.detached_run_script(p, system, [f"{p.remote_root.rstrip('/')}/inputs/{os.path.basename(r.path)}" for r in valid], check_files=True)
         self.log.appendPlainText(f"\n$ {remote.ssh_display(p)}  (start `scope set_path` and `scope run` for {system}, detached)\n")
         self.background(lambda: remote.run_script(p, script, timeout=60), lambda res: self.started(p, system, res), f"Starting the run on {p.host}…")
 
     def started(self, p: "remote.Profile", system: str, res: "remote.Result") -> None:
         info = remote.parse_started(res.stdout)
         if not info: self.log.appendPlainText("Could not start the run: " + (res.stderr.strip() or res.stdout.strip() or f"exit code {res.returncode}")); self.status.setText("The run did not start." + self.reconnect_hint(res)); return
+        if info["state"] == "missing":                                      ## checked on the cluster before starting: nothing was started
+            elsewhere = [path for kind, path in info["files"] if kind == "envdir"]
+            if elsewhere:                                                   ## the environment of another project folder: uploading again would not help
+                root = p.remote_root.rstrip("/")
+                self.log.appendPlainText(f"Not started: the cluster environment file {p.remote_env} keeps its systems in {elsewhere[0]}, but this workspace's project folder is {root}, "
+                                         f"where Upload puts them ({root}/Systems). `scope set_path` would not find the system.\n"
+                                         f"Fix it in card 2: choose the environment file of {root} (if it has none, create one there on the cluster with `scope config -n <name>`), "
+                                         f"or set the project folder to the folder of that environment.")
+                self.status.setText(f"Not started: the environment file belongs to another project folder ({os.path.dirname(elsewhere[0].rstrip('/'))}). See the log; fix card 2, then Run."); set_kind(self.status, "warn"); return
+            system_gone = any(kind == "system" for kind, _ in info["files"]); inputs_gone = [path for kind, path in info["files"] if kind == "input"]
+            what = " and ".join(([f"the system file of '{system}'"] if system_gone else []) + ([f"{len(inputs_gone)} input file(s)"] if inputs_gone else []))
+            self.log.appendPlainText(f"Not started: {what} not on the cluster yet:\n" + "\n".join(f"  {path}" for _, path in info["files"]) + "\nPress Upload (it copies the system file and the input files), then Run.")
+            self.status.setText(f"Not started: {what} not on the cluster yet. Press Upload, then Run."); set_kind(self.status, "warn"); return
         if info["state"] == "busy":
             self.log.appendPlainText(f"A run of '{system}' is already active on the cluster (process {info['pid']}). Two runs on one system can overwrite each other's results, so none was started. Following the active one…"); self.watch_runs(); return
         self.begin_watch(p, system, info["log"], f"Run started on the cluster (process {info['pid']}). It keeps going if you close this window or lose the connection.")

@@ -60,9 +60,18 @@ def test_the_page_is_grouped_in_cards_and_keeps_every_field(login):
     app, win, tab = make_tab(login)
     from PySide6.QtWidgets import QFrame, QLabel
     titles = [l.text() for l in tab.findChildren(QLabel) if l.objectName() == "sectiontitle"]
-    assert sorted(titles) == sorted(["1 · Connection", "2 · SCOPE on the cluster", "3 · Project on the cluster  (this workspace)", "Status and checks", "Transfer and run"])
-    assert len([f for f in tab.findChildren(QFrame) if f.objectName() == "card"]) == 5
+    assert titles == ["1 · Cluster", "2 · Project on the cluster  (this workspace)", "3 · Transfer and run"]                   # in the order of use
+    assert len([f for f in tab.findChildren(QFrame) if f.objectName() == "card"]) == 3
     assert sum(1 for b in (tab.connect_btn, tab.test_btn, tab.save_btn, tab.run_btn) if b.property("primary")) == 2          # Connect… and Run, one main action each
+    for w in (tab.name, tab.host, tab.user, tab.port, tab.scope_bin, tab.activate, tab.root, tab.env_file): assert tab.isAncestorOf(w)   # every field is still there
+
+def test_a_complete_profile_is_one_line_until_edit(login):
+    app, win, tab = make_tab(login); win.resize(1240, 900); win.show(); win.show_step("cluster"); app.processEvents()
+    assert tab.save_profile(); tab.select_profile("fake"); tab.edit_btn.setChecked(False); app.processEvents()
+    assert not tab.profile_box.isVisible() and login.host in tab.summary.text() and "/s" in tab.summary.text()
+    tab.edit_btn.setChecked(True); app.processEvents(); assert tab.profile_box.isVisible()
+    tab.edit_btn.setChecked(False); tab.new_profile(); app.processEvents(); assert tab.profile_box.isVisible()               # a new profile opens its fields by itself
+    assert not tab.pre_up.isVisible() and not tab.table.isVisible()                                                          # Upload previews and asks; test details appear after a test
 
 def test_the_advanced_line_is_folded_until_asked_or_needed(login):
     app, win, tab = make_tab(login); win.resize(1240, 900); win.show(); win.show_step("cluster"); app.processEvents()

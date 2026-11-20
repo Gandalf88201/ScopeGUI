@@ -79,7 +79,7 @@ def test_marker_files_are_read_from_system_folder(env, tmp_path):
 def test_read_input_valid_and_invalid(tmp_path):
     ok  = backend.read_input(write(tmp_path, "a.scope", job()))
     bad = backend.read_input(write(tmp_path, "b.scope", "nonsense\n"))
-    assert ok.ok and ok.node == "demo/opt" and ok.want_submit is False and ok.procs == 4
+    assert ok.ok and ok.node == "demo/*/opt" and ok.want_submit is False and ok.procs == 4
     assert not bad.ok and "branch" in bad.error
     assert not backend.read_input(str(tmp_path / "nope.scope")).ok
 
@@ -94,8 +94,8 @@ def test_graph_missing_cycle_and_layout(tmp_path):
     backend.layout_graph(nodes, edges)                                                                    # must terminate on a cycle
     c = backend.read_input(write(tmp_path, "c.scope", job(name="c", requisites="['ghost']")))
     nodes, edges, cycles = backend.build_graph([c])
-    assert nodes["demo/ghost"] == "missing" and not cycles
-    place = backend.layout_graph(nodes, edges); assert place["demo/ghost"][0] < place["demo/c"][0]
+    assert nodes["demo/*/ghost"] == "missing" and not cycles
+    place = backend.layout_graph(nodes, edges); assert place["demo/*/ghost"][0] < place["demo/*/c"][0]
 
 # ---- run command and warnings
 def test_run_command_and_child_env(tmp_path):
@@ -124,6 +124,7 @@ def test_window_end_to_end(env, tmp_path):
     backend.import_xyz(e, write(tmp_path, "water.xyz", WATER)); win.session.systemsChanged.emit()
     win.session.add_inputs([write(tmp_path, "a.scope", job()), write(tmp_path, "bad.scope", "x\n")])
     assert win.pipe_tab.graph.scene() is not None and len(win.pipe_tab.graph.scene().items()) > 0      # regression: scene was garbage collected
+    from scope.gui import systems; systems.confirm_defaults(e, "water", "water")                         # charge and spin checked: no question before the run
     rt = win.run_tab; rt.system.setCurrentText("water"); rt.start()
     t0 = time.time()
     while rt.running() and time.time() - t0 < 90: app.processEvents(); time.sleep(0.05)

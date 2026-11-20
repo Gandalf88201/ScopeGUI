@@ -148,13 +148,13 @@ The **Runs** page (left bar) lists every run of every workspace in one table: th
 | waiting for jobs | SCOPE has ended, and jobs it submitted are still in the queue. The *Jobs* column says how many are running or pending (hover over it for the job ids). |
 | done, results not read yet | (cluster) No job of the system is left in the queue, but files in `Computations/<system>/` were written after SCOPE last saved the system: SCOPE has not read them, so the system file does not hold their results yet. Hover over the state for what to do. |
 | finished (exit 0) | SCOPE has ended and, on a cluster, none of the system's jobs is left in the queue. Run again to let SCOPE collect the results and go on with the next jobs. |
+| stopped / ended without finishing | SCOPE was stopped, or its process disappeared without writing how it ended. |
 
 **Why results can be "not read yet".** SCOPE reads (registers) the output of a calculation only when it runs, and saves the system file at the end of each run. On a cluster, `scope run` submits the jobs and ends; the jobs write their outputs later. Until SCOPE runs again, the cluster's system file does not contain those results, and neither does a copy of it you download. Two ways to have them read:
 - press **Run on the cluster** again (SCOPE reads the outputs and goes on with the next jobs, if any), then **Download results…** with the system file ticked; or
 - download the outputs and run the system on this computer (Run page): SCOPE reads them here.
 
 The window notices this by comparing dates: a file in `Computations/<system>/` newer than `Systems/<system>/<system>.npy` was written after SCOPE last saved. A file you touched by hand there counts too.
-| stopped / ended without finishing | SCOPE was stopped, or its process disappeared without writing how it ended. |
 
 A job belongs to a system when it runs in the system's folder of the project (`Computations/<system>/…`) or, if the scheduler does not tell the folder, when its name starts with the system name. Folders are also compared with their links resolved, so a project reached through a link (for instance `/home/…` pointing to `/gpfs/home/…`) still finds its jobs.
 
@@ -162,16 +162,17 @@ The queues of Slurm (`squeue`) and SGE (`qstat`, recognised by `qconf` or `$SGE_
 
 ## How SCOPE thinks
 
-SCOPE organises work in a fixed hierarchy: **System → Branch → Workflow → Job → Computation**.
+SCOPE organises work in a fixed hierarchy: **System → Branch → Workflow → Job → Computation**. Next to it, the chemistry lives in **System → Source → State**: a workflow is one source inside one branch, and its jobs read and write states of that source.
 
 | Term | Meaning |
 |---|---|
 | **Environment** | Where things are: three folders (sources, systems, computations) and, on a cluster, the scheduler, queues and software modules. Saved as `scope_env_<name>.npy`. |
-| **Source** | A structure: a molecule or a crystal cell, normally read from an `.xyz` file. |
 | **System** | The container for one chemical entity: its sources and all calculations done on them. Saved as `Systems/<name>/<name>.npy`. |
+| **Source** | A structure of the system: a molecule or a crystal cell, normally read from an `.xyz` file. One system can hold several, for instance the high- and the low-spin geometry of one compound. The charge and spin belong to the source. |
+| **State** | One geometry and its results inside a source: `initial` when the source is imported, then the states jobs write (an optimised geometry with its energy, frequencies…). States belong to the source, not to a branch. |
 | **Branch** | A line of work inside a system, a folder in `Computations/<system>/`. The jobs of one pipeline share a branch. |
-| **Workflow** | The set of jobs applied to one source. |
-| **Job** | One step of the pipeline, such as an optimization (`opt`) or a frequency calculation (`freq`). |
+| **Workflow** | The set of jobs applied to one source inside one branch. An input file's *workflow* field is a pattern of source names (`*`, `hs*`…) that says which workflows the job goes into. |
+| **Job** | One step of the pipeline, such as an optimization (`opt`) or a frequency calculation (`freq`). It reads one state (*istate*) and writes one (*fstate*). |
 | **Computation** | One real software run with its input, output and status. A job can create several (retries, continuations). |
 | **Input file** | A small text file (`.scope`) that tells SCOPE which job to run, with which software and settings. |
 
@@ -204,7 +205,7 @@ The environment tells SCOPE where your files live. It records three folders:
 
 A system is the container for one molecule or crystal and everything calculated on it.
 
-The table lists the systems found in the environment's Systems folder, with the branches that are finished or terminated (SCOPE marks them with small files named `<branch>_FINISHED` and `<branch>_TERMINATED`). Select a row to see its structure below; the first system is shown straight away.
+The tree lists the systems found in the environment's Systems folder as **System → Source → State**, with the branches that are finished or terminated (SCOPE marks them with small files named `<branch>_FINISHED` and `<branch>_TERMINATED`). Open a system to see its sources, and a source to see its states and what each holds (geometry, energy, frequencies). Select a system to see its structures below; the first system is shown straight away. Select a source (or one of its states) to see and set its charge and spin in the **Source** box.
 
 ### The structure
 
@@ -220,13 +221,32 @@ The lower half shows the structure SCOPE will compute, as SCOPE holds it in the 
 
 ### Import molecules
 
-Press **Import .xyz…** and choose one or more files. The file name, without `.xyz`, becomes the system name, and the file is copied into `Sources/<name>/`.
+**Import .xyz…** offers three ways:
+
+- **One new system per file**: each file becomes its own system, named after the file (without `.xyz`).
+- **One new system with these files as its sources**: you name the system, and each file becomes one of its sources (for instance `fe_hs.xyz` and `fe_ls.xyz` for the two spin states of one compound). This is the usual case when the structures belong together.
+- **Add files as sources of the selected system**: the files become new sources of a system that already exists. You confirm the name of each source (dots in the file name are kept). Refused while a run of that system is active on this computer; the previous system file is kept as `<system>.npy.bak-<time>`.
+
+Every file is copied into `Sources/<system>/`.
+
+### Charge and spin
+
+An `.xyz` file has neither, so an imported source starts with every atom at charge 0 and spin 0. That is SCOPE's **import default**: the Source box says so in amber, and the Run page warns before running a source whose values were never checked. A radical with the default spin 0 is shown in red: its electron count cannot have 2S = 0.
+
+- **Total charge** and **Total spin (2S)**: what every calculation of the source uses (Gaussian writes them as charge and multiplicity 2S + 1). They are the **sums of the atoms' values**, as SCOPE stores them. **Save totals** sets every atom to 0 and puts the whole charge and spin on one atom (the first metal, else the first atom), which avoids SCOPE's own behaviour of adding to whatever atom 1 already had. **Confirm as they are** marks the current values as checked.
+- **Atoms…** lists every atom with its charge, its spin and the atoms it is bonded to, and lets you set them one by one (for instance the spin on each metal centre, which Quantum ESPRESSO uses to start the magnetisation). The totals update as you type.
+- **Connectivity…** shows SCOPE's adjacency matrix: a 1 where two atoms are bonded.
+- The spin must agree with the number of electrons (an even count needs an even 2S); a value that does not is refused. Quantum ESPRESSO inputs need a neutral state: the Run page warns otherwise.
+
+> **Note.** Changes are saved into this computer's system file. If the system also runs on a cluster, upload it before the next cluster run, and do not download the cluster's system file over it afterwards.
 
 > **Warning.** Use only letters, digits, `_`, `-` and `.` in the name. A space in a system name breaks job submission on a cluster.
 
 ## 3 · Pipeline
 
-A pipeline is a set of input files. Each file describes **one job**. The table lists the files, and the graph shows how they depend on each other, read from left to right: an arrow **A → B** means that B starts only after A has finished.
+A pipeline is a set of input files. Each file describes **one job**. The table lists the files with the state each job reads and writes, and the graph draws them as SCOPE's manuscript does, from left to right: jobs are boxes, **states** are pills between them. A state → job arrow means the job starts from that geometry; a job → state arrow means it writes that state; a dashed arrow back to a state means the job adds its results to the state it read (frequencies on the optimised geometry). A dotted grey arrow **A → B** is a requisite: B starts only after A has finished.
+
+A job is identified by **branch, workflow and job name**: an `opt` job for the `hs*` sources and one for the `ls*` sources are two different jobs, not a duplicate. Choose a system in **Check against system** to match the workflow patterns against its real sources.
 
 ### The input form
 
@@ -237,23 +257,46 @@ A pipeline is a set of input files. Each file describes **one job**. The table l
 | Branch | The folder name for this line of work, for example `demo` |
 | Workflow (sources) | Which sources of the system to run: `*` for all, a name, a pattern such as `water*`, or several names separated by commas |
 | Job name | `opt`, `freq`, `scf`… |
-| Requisites | Jobs that must finish before this one. Empty means *start right away*. A `freq` job after an optimization needs `opt`. |
+| Requisites (when) | Jobs that must finish before this one. Empty means *start right away*. A `freq` job after an optimization needs `opt`. Requisites decide only **when** the job starts, never which geometry it uses. |
+| Initial state (istate) | The state the job starts from. `initial` is the imported structure. To start from the result of an earlier job, give the state that job writes: for `freq` after `opt`, `opt`. When you type a requisite, the form fills it in for you. |
+| Final state (fstate) | The state the job writes. SCOPE's default is the job name. The form proposes it for jobs that make a new geometry (opt, ts, relax), and the initial state for the others (freq, scf, td), so their results sit on the geometry they used. |
 | Constrains | Jobs that block this one once they are finished. `self` prevents running the same job twice. |
 | Software and computation type | Gaussian 16 (`g16`: scf, opt, freq, ts, td, tda) or Quantum ESPRESSO (`qe`: scf, opt, relax, vc-relax, freq) |
 | Functional, basis set, processors, queue | Chemistry and resources. The queue is optional; on a cluster it must match one of the environment's queues exactly. |
 | Submit | When ticked, the file says `want_submit = True` and SCOPE submits jobs to the scheduler. Unticked by default. |
 
-Other settings go in the tabs below the form, one `key = value` per line. **Edit selected…** reopens a file in the same form; comments in the file are not kept.
+Other settings go in the tabs below the form, one `key = value` per line. **Edit selected…** (or a double-click on a job in the graph) reopens a file in the same form; comments in the file are not kept.
+
+### Add a job after another one
+
+The easiest way to build a sequence: select a job in the table and press **Add job after selected…**, or right-click its box in the graph and choose **Add a job after…**. The form opens already filled in for a job that waits for that one and starts from its result:
+
+- the same branch and sources (a job only waits for jobs of its own branch and source);
+- *Requisites* = that job, and *Initial state* = the state it writes, so the new job uses its geometry;
+- the same software, method, extra settings (the *&qc_data*, *&environment* and *&options* tabs), processors, queue and submission choice;
+- a job type that usually comes next (*freq* after a geometry job, else *scf*) and a name the branch does not use yet.
+
+Check everything, in particular the queue and *Submit*, and press **Save**: nothing is saved before, and nothing runs until you press Run. Settings of the *&job_data* tab (for instance `job_setup = 'rep_opt'`) are not copied, since they describe the first job only.
+
+### Connect jobs you already have
+
+- **Drag** from one job's box onto another's in the graph: the second job waits for the first and starts from its result. A window lists the settings that change in the second job's file (`~` changed, `+` added); nothing is written until you press **Save the change**.
+- **Several jobs in a row:** select them in the table (Cmd/Ctrl- or Shift-click) and press **Chain selected…**. Put them in order by dragging them in the list (the proposal keeps the order they already have, otherwise the table's order); each job will wait for the one above it and start from its result. The preview shows every file that changes; **Save the changes** writes them all.
+- **One job after several** (for instance a single point that needs two optimisations): drag each of them onto it. A job reads one state, so it keeps starting from the first one's result; the others only decide when it starts.
+
+What is linked follows SCOPE's rules: both jobs in the same branch, on sources that meet, no job waiting for itself, no cycle. A link that breaks them is refused with the reason. A job that writes its results into a state without a geometry (an `scf` writing `sp`) passes on the geometry it used, so the next job never starts from a state without coordinates; a `freq` job still writing SCOPE's default state writes onto the geometry it starts from, so energy and frequencies sit on one state. The file is written again from its settings: comments in it are not kept.
 
 > **Warning.** Never list a job's own name under *Requisites*. The job would wait for itself and never start.
 
 ### Warnings in the pipeline
 
-Orange warnings mean that SCOPE would accept the file but something looks wrong: a job that requires itself, a requisite that no loaded file defines, two files that define the same job, or a cycle.
+Orange warnings mean that SCOPE would accept the file but something looks wrong: a job that requires itself, a requisite that no loaded file defines for the same sources, two files that define the same job for the same sources, a cycle, a state name written as a requisite (requisites are job names), a requisite that is a job of another branch or of other sources (SCOPE only waits for jobs of the same branch and source), a job that waits for another one but still reads a different state (typically `freq` after `opt` reading `initial`), a state no loaded job writes, or two branches that write the same state of the same sources (states belong to the source, so one would overwrite the other).
 
-## 4 · Run
+## 4 · Run here
 
-Choose a system and press **Run**. The log shows what SCOPE does, live. At the end SCOPE prints a *manual attention required* block: read it, because it lists what you should check.
+Choose a system and press **Run**. The log shows what SCOPE does, live.
+
+**Review before running.** Above the log, a table lists every input file as it will run: the job, its branch and sources, software and type, the state it reads and the one it writes, what it waits for, processors, queue, and whether it submits jobs. The **Check** column says ✓ *ready*, ! *to look at* (a warning of the Pipeline page) or ✗ *will not run as meant* (a file SCOPE does not accept, or a queue the environment does not have); hover over it for every message. The **Cluster** page shows the same table for the cluster: its queues and scheduler are known after **Test connection**, and missing software found by the test is listed too. **Review…** on the Pipeline page opens it on its own. At the end SCOPE prints a *manual attention required* block: read it, because it lists what you should check.
 
 ### Start a run
 
@@ -306,7 +349,7 @@ The module names you give there are what SCOPE uses to find Gaussian 16 and Quan
 
 ### Set up a profile
 
-The page is grouped in cards. **1 · Connection** is the profile: the connection to one cluster, shared by all workspaces, with the buttons **Connect…**, **Disconnect**, **Test connection** and **Save profile**. **2 · SCOPE on the cluster** says where `scope` is. **3 · Project on the cluster** belongs to the workspace shown, so each workspace can use its own folder on the same cluster. **Status and checks** and **Transfer and run** come below.
+The page has three cards, in the order you use them. **1 · Cluster** is the profile: the connection to one cluster, shared by all workspaces. Once it is saved and complete it takes one line (who, where, where `scope` is) with **Connect…**, **Disconnect** and **Test connection**; **Edit…** shows its fields (host, user, port, path of `scope`, **Save profile**), and a new or incomplete profile shows them by itself. The three lights and, after a test, **Details of the last test** are in this card too (the details open by themselves when something needs a look). **2 · Project on the cluster** belongs to the workspace shown, so each workspace can use its own folder on the same cluster. **3 · Transfer and run** has the buttons of everyday use and the log.
 
 Press **New** (or start typing, the first time), fill in the connection and press **Save profile**. If the cluster needs a password, press **Connect…** now. Then fill in the project fields: they are saved with the workspace as you type. The yellow hint under the fields says what is still missing; it turns into a green tick when both parts are complete.
 
@@ -335,7 +378,9 @@ Press **Connect…**. This window logs in the way your Terminal does, and shows 
 
 Nothing you type is saved: it is passed to ssh and forgotten, never written to a file, a log or the profile. When the login works, the connection stays open for 4 hours, the badge at the top right of the card says **Connected to** and the host name, and every button on the page (test, upload, run, download) reuses it without asking again. **Disconnect** closes it; a run already started on the cluster keeps going. When the 4 hours pass, or the cluster closes the connection, the badge turns to *Not connected* and the next button that needs the cluster tells you to press **Connect…** again. A key without a password needs no such step: the badge may stay *Not connected* and the buttons still work.
 
-If you prefer to type the password in the Terminal (or **Connect…** is not available on your computer), press **Terminal command…**, copy the command (it already contains the port and the user of the profile), run it once in the Terminal app and log in. The window reuses that connection too.
+If you prefer to type the password in the Terminal, press **Terminal command…** (under **Edit…**), copy the command (it already contains the port and the user of the profile), run it once in the Terminal app and log in. The window reuses that connection too.
+
+**On Windows.** The `ssh` that comes with Windows cannot keep a shared connection open, and the window cannot relay a password there, so every command logs in on its own with a **key**. The button is **Set up key login…**: it opens a console window that creates a key if you have none (press Enter twice for no passphrase: the window needs a key it can use without asking) and adds it to `~/.ssh/authorized_keys` on the cluster. You type the cluster password there, once, and the window never sees it. Then press **Test connection**. **Commands to do it yourself…** shows the same two commands for PowerShell. If the cluster does not accept keys, Windows cannot reach it from this window; use WSL or a Mac or Linux computer. Windows has no `rsync` either: files are then copied with `tar` through `ssh` (both come with Windows 10 and 11), whole files at a time, with their dates kept and nothing deleted.
 
 ### Test connection
 
@@ -370,13 +415,13 @@ The lights are a snapshot: they change only when you press **Test connection** a
 
 | Button | What it does |
 |---|---|
-| **Preview upload** | Lists what would be copied. Nothing is copied. |
-| **Upload** | Copies the selected system and the input files. Generated calculation files are never uploaded: SCOPE writes them on the cluster. |
-| **Run on the cluster** | Starts `scope run` there and shows the log here. SCOPE first runs `scope set_path` so that the paths stored in the system match the cluster folders. You confirm first, and the window says whether the input files will submit jobs. |
+| **Upload** | Copies the selected system and the input files. It first compares both sides: it warns when the cluster's system file is newer than this computer's (uploading would replace it), and offers to copy the calculation files (inputs and outputs) that are only here, because the system file alone is not enough. |
+| **Run on the cluster** | Starts `scope run` there and shows the log here. SCOPE first runs `scope set_path` so that the paths stored in the system match the cluster folders. You confirm first, and the window says whether the input files will submit jobs. Run does not copy anything: if the system file (`Systems/<system>/<system>.npy`) or an input file is not on the cluster yet, nothing starts and the status line says to press **Upload** first. It also checks that the cluster environment file belongs to the project folder: SCOPE reads systems from the environment's *Systems* folder, so an environment made for another folder (for instance one shared by two workspaces with different project folders) would never find what Upload copied. Each project folder needs its own environment, created there with `scope config`. |
 | **Watch runs** | Finds a run that is active on the cluster, for example one started before the window was closed, and follows its log. After a passed connection test, the window also tells you if a run is active. |
-| **Stop watching** | Stops following. The run goes on. |
 | **Stop the run** | Asks the cluster to end the run (the whole run, not only its launcher). Jobs already submitted are not cancelled. |
 | **Download results…** | Lists the results of the selected system on the cluster and lets you choose what to bring back (see *Download results*). |
+
+**Synchronisation.** The input and output files in `Computations/<system>/` are the source of truth: the system file only records what SCOPE read from them, and SCOPE reading the same files (same version, same inputs) registers the same results again. So a system can be worked on in several places as long as those files are kept in step, and copying the `.npy` alone is not enough. Different branches, or different workflows (sources), can run on different clusters. Jobs of one workflow should run in one place: later jobs read the states earlier ones write. **Upload** and **Download results…** warn when the two sides differ.
 
 A run started from here is detached: it has its own process and log on the cluster (in `<project>/logs/`), so it keeps going if you close the window, if the window crashes, or if the connection drops. Jobs already handed to the scheduler are never affected by the window. A second run of the same system is refused while one is active.
 
@@ -448,17 +493,19 @@ The page reloads by itself whenever the system file changes, for instance at the
 
 | Shown | SCOPE's status | Meaning |
 |---|---|---|
-| ✓ worked | `worked` | Finished normally |
+| ✓ finished and converged | `worked` | SCOPE extracted results, the program finished normally and it converged |
 | ✓ finished (no new geometry) | `no_coord` | Finished normally; a single point produces no new geometry, so this is the usual result of an `scf` job |
+| ◐ results extracted, run not finished | `worked` | SCOPE could read results (for instance the last geometry), but the program did not end normally. The values are provisional |
+| ≈ finished, not converged | `worked` | The program ended, but the SCF or the optimisation did not converge (or, for a repeated optimisation, its convergence criteria are not met yet) |
 | ! stopped by the time limit | `time_stopped` | SCOPE continues it in a new run (r2, r3…) |
 | ✗ SCF did not converge, aborted | `no_scf_convergence`, `aborted` | Failed. With `-e`, SCOPE resubmits common failures by itself |
 | ◌ output here, not registered yet | — | The output is here but SCOPE has not read it: run the system again (Run page) to register it |
 | … no output here | — | Still running, not downloaded, or not started |
 | ? unknown | anything else | A status this window does not know |
 
-In the Overview the status is that of the **last** calculation of the state, whose values the state holds; *(after a retry)* means an earlier one stopped or failed and was continued. Labels follow SCOPE's file names: `opt r2` is the second run of job `opt`, and `vc s3 r2` the second run of step 3 of a repeated job.
+SCOPE's status `worked` only means that results could be extracted; the window also uses SCOPE's *finished* and *converged* flags, so green means all three. The Calculations CSV has *finished* and *converged* columns. In the Overview the status is that of the **last** calculation of the state, whose values the state holds; *(after a retry)* means an earlier one stopped or failed and was continued. Labels follow SCOPE's file names: `opt r2` is the second run of job `opt`, and `vc s3 r2` the second run of step 3 of a repeated job.
 
-**ΔE.** Energies are compared only between states with the same formula **and** the same method (software, functional, basis or pseudopotentials, as asked for in the input). ΔE is measured from the lowest of them, in the units you choose. A state with nothing comparable has no ΔE.
+**ΔE.** Energies are compared only between states with the same formula, the same **charge** and the same **method**: every input setting that changes an energy. For Gaussian: functional, basis, dispersion correction, unrestricted, integration grid. For Quantum ESPRESSO: functional, pseudopotential library (`pp_library`), Hubbard U, dispersion correction. The Method column shows them all. The spin is not part of it, so the high- and low-spin states of one compound are compared. ΔE is measured from the lowest of them, in the units you choose. A state with nothing comparable has no ΔE.
 
 > **Note.** A system saved with an add-on (for instance spin crossover, `scope-sco`) needs that add-on to be opened. The launcher installs the add-ons of the checkout; if one is missing, the page says which and gives the install command.
 
@@ -489,7 +536,7 @@ The numbers are SCOPE's own (`state.get_thermal_data`), per formula unit (cells:
 
 > **Note.** Subtracting two states of different formula or method is allowed but warned about: their ΔG has no meaning.
 
-**The Compare tab.** Tick the systems to compare (the one shown is ticked), choose *Electronic energy* or *Gibbs energy G(T)* (with its temperature, model and imaginary policy) and press **Compare**. Other systems are read in the background, read-only, and kept until their file changes. Δ is measured from the lowest value among the states with the same formula **and** method, across all the systems ticked; states with nothing comparable are listed without Δ. Select a row to plot its group as bars. **Copy table (CSV)** and **Save plot…** export it.
+**The Compare tab.** Tick the systems to compare (the one shown is ticked), choose *Electronic energy* or *Gibbs energy G(T)* (with its temperature, model and imaginary policy) and press **Compare**. Other systems are read in the background, read-only, and kept until their file changes. Δ is measured from the lowest value among the states with the same formula, charge and method, across all the systems ticked; states with nothing comparable are listed without Δ. Select a row to plot its group as bars. **Copy table (CSV)** and **Save plot…** export it.
 
 > **Note.** The method shown is the one SCOPE's input asked for (software, functional, basis). If an output was produced with other settings than its input file says, the page cannot tell.
 
@@ -596,7 +643,7 @@ Worth knowing:
 | Results: the IR spectrum is flat | The output gave no IR intensities (all zero) | Expected for some methods; the Frequencies sub-tab still lists the modes |
 | Results: a state is missing from the Thermochemistry list | It has no frequencies or no energy | Run a frequency job on it |
 | Results: *the 'raise' policy stops at an imaginary frequency* | The state has an imaginary frequency (a transition state, or a geometry that is not a minimum) | Choose *ignore*, or re-optimise the geometry |
-| Results: no ΔE for a state | No other state has the same formula and method, so the energies cannot be compared | Expected |
+| Results: no ΔE for a state | No other state has the same formula, charge and method (every energy setting), so the energies cannot be compared | Expected, or check the Method column for a setting that differs |
 | Results: *Jupyter Lab is not installed in this window's Python* | The notebook was written, but Jupyter Lab is missing | Run the install command shown, or open the notebook in VS Code |
 | Results: the notebook does not open in the browser | Jupyter Lab is starting, or failed to | Wait a few seconds; its messages are in `Notebooks/.jupyter-scope-gui.log` |
 | Notebook: *this kernel is not the Python of the SCOPE window* | Jupyter chose another kernel | In Jupyter, *Kernel → Change kernel* and choose *SCOPE GUI*, or open the notebook from the window again |

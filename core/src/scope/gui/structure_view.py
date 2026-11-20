@@ -37,7 +37,7 @@ class SvgView(QWidget):
 class DetailsDialog(QDialog):
     """SCOPE's own text description of a system, in a window large enough to read it (monospaced, resizable, copyable)."""
     def __init__(self, parent, title: str, text: str):
-        super().__init__(parent); self.setWindowTitle(title); self.resize(980, 720)
+        super().__init__(parent); self.setWindowTitle(title); theme.fit(self, 980, 720)
         self.text = QPlainTextEdit(text); self.text.setReadOnly(True); self.text.setLineWrapMode(QPlainTextEdit.NoWrap)
         mono = QFontDatabase.systemFont(QFontDatabase.FixedFont); mono.setPointSize(max(mono.pointSize(), 12)); self.text.setFont(mono)
         copy, close = QPushButton("Copy"), QPushButton("Close"); copy.clicked.connect(lambda: QGuiApplication.clipboard().setText(self.text.toPlainText())); close.clicked.connect(self.accept)

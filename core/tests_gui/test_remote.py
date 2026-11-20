@@ -97,7 +97,7 @@ def test_probe_reports_missing_scope_and_env(cluster):
 def test_probe_flags_a_different_folder_layout(cluster, tmp_path):
     other = remote.Profile(**{**cluster.__dict__, "remote_root": str(tmp_path)})           # project folder that is not the parent of the environment's folders
     by = {c.name: c for c in remote.evaluate_probe(other, remote.run_script(other, remote.probe_script(other)))}
-    assert by["Folder layout"].status == "warn"
+    assert by["Folder layout"].status == "fail" and "systems" in by["Folder layout"].detail     # every run would stop in scope set_path (reported)
 
 def test_connection_failure_gives_a_hint(cluster, monkeypatch):
     monkeypatch.setenv("FAKE_SSH_FAIL", "1")
