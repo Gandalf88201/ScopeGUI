@@ -1438,7 +1438,7 @@ class Computation(object):
         ## 2-If output exists, prompts for registration
         if self.output_exists and not self.isregistered:
             print(f"    Output file Found Pending to be REGISTERED")
-            print(f"    {self.output_path}")
+            print(f"    {self.out_path}")
             print(f"    ")
 
         ## 3-Evaluates Submission
