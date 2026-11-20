@@ -91,11 +91,11 @@ def test_systems_page_shows_the_first_system_at_once_and_follows_the_selection(e
     win = MainWindow(); win.session.set_environment(env, info); win.show_step("systems"); panel = win.sys_tab.structure
     names = [r.name for r in win.sys_tab.rows]
     assert names == sorted(names) and panel.current() is not None                                # something is shown without clicking
-    win.sys_tab.table.selectRow(names.index("ester")); app.processEvents()
+    win.sys_tab.select_system("ester"); app.processEvents()
     assert panel.formula.text() == "C7H14O2" and panel.atoms.text().startswith("23") and "SCOPE perceived" in panel.origin.text()
     assert panel.chooser.count() == 1 and panel.drawing.isVisibleTo(panel) and "Bond orders" not in panel.no_drawing.text()
     panel.details_btn.click(); app.processEvents()
-    assert panel.details_dialog.isVisible() and "ester" in panel.details_dialog.text.toPlainText().lower() and panel.details_dialog.width() >= 900   # its own, readable window
+    assert panel.details_dialog.isVisible() and "ester" in panel.details_dialog.text.toPlainText().lower() and panel.details_dialog.width() >= min(900, int(panel.details_dialog.screen().availableGeometry().width() * 0.95))   # its own, readable window (never wider than the screen)
     assert "ester" in panel.details_dialog.windowTitle()
 
 def test_the_3d_view_rotates_zooms_resets_and_draws(ester_system):

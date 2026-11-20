@@ -21,7 +21,7 @@ class DownloadDialog(QDialog):
         super().__init__(parent)
         self.p, self.info, self.system, self.files, self.listing, self.tasks, self.busy, self.unread = profile, info, system, [], {}, [], False, []
         self.wanted = set(wanted or [])                                     ## files to tick (outputs the Results page misses), instead of the usual proposal
-        self.setWindowTitle(f"Download results of '{system}'"); self.resize(980, 640)
+        self.setWindowTitle(f"Download results of '{system}'"); theme.fit(self, 980, 640)
         src  = f"{profile.host}:{profile.remote_root.rstrip('/')}/Computations/{system}/"; dst = os.path.join(info.computations_path, system) + "/"
         head = QLabel(f"From  <b>{src}</b><br>to  <b>{dst}</b>  (this workspace's folder)"); head.setTextFormat(Qt.RichText); head.setWordWrap(True)
         self.filter = QLineEdit(); self.filter.setPlaceholderText("Show only… (for instance *.log or opt)"); self.filter.setClearButtonEnabled(True)
@@ -117,7 +117,10 @@ class DownloadDialog(QDialog):
         problem = transfer.space_problem(self.info, total) if total else ""
         text = f"{len(chosen)} of {len(self.files)} file(s) ticked, {transfer.human(total)}." + (f"  {len(heavy)} of them heavy or over the limit." if heavy else "") + (f"\n{problem}" if problem else "")
         if self.unread: text += f"\n{len(self.unread)} output(s) are not read by SCOPE yet: the cluster's system file does not include their results (see below)."
-        self.summary.setText(text); theme.set_kind(self.summary, "err" if problem else ("warn" if heavy or self.unread else "ok"))
+        left = transfer.left_behind(self.files, self.with_system.isChecked())
+        if left: text += (f"\nThe cluster's system file is ticked, but {len(left)} input/output file(s) it may refer to are not (new or changed on the cluster). "
+                          "Copying the system file alone is not a synchronisation: this computer could not re-read, continue or check those calculations. Press 'Propose new and changed' to tick them.")
+        self.summary.setText(text); theme.set_kind(self.summary, "err" if problem else ("warn" if heavy or self.unread or left else "ok"))
         self.download_btn.setEnabled(not self.busy and (bool(chosen) or self.with_system.isChecked()) and not problem)
 
     ##### copy #####

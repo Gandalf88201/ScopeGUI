@@ -177,10 +177,20 @@ def ssh_exe() -> str:
 def rsync_exe() -> str:
     return os.environ.get("SCOPE_GUI_RSYNC", "rsync")
 
+def shares_connection() -> bool:
+    """Whether ssh can keep one shared connection open (ControlMaster) that every command reuses. macOS and Linux can; the OpenSSH that
+    comes with Windows cannot (it has no Unix sockets for it), so on Windows every command logs in on its own: a key is needed."""
+    return os.name == "posix"
+
 def control_path() -> str:
     """Socket of the shared SSH connection. Kept short: macOS refuses socket paths longer than 104 characters."""
     base = os.path.expanduser("~/.ssh")
-    return os.path.join(base, "cm-%C") if os.path.isdir(base) else f"/tmp/scope-gui-{os.getuid()}-%C"
+    uid = os.getuid() if hasattr(os, "getuid") else os.getpid()            ## os.getuid does not exist on Windows (never used there: no shared connection)
+    return os.path.join(base, "cm-%C") if os.path.isdir(base) else f"/tmp/scope-gui-{uid}-%C"
+
+def control_options() -> list:
+    """The options that reuse (or open) the shared connection; none where ssh cannot share one (Windows)."""
+    return ["-o", "ControlMaster=auto", "-o", f"ControlPath={control_path()}", "-o", "ControlPersist=10m"] if shares_connection() else []
 
 def account_options(p: "Profile | None") -> list:
     """-p PORT and -l USER when the profile sets them (otherwise ~/.ssh/config or ssh's defaults apply)."""
@@ -189,7 +199,7 @@ def account_options(p: "Profile | None") -> list:
 
 def ssh_options(p: "Profile | None"=None) -> list:
     """Options for every command the GUI runs: never ask anything, give up quickly, reuse a shared connection if one is open; then the profile's port and user."""
-    return ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-o", "ServerAliveInterval=30", "-o", "ControlMaster=auto", "-o", f"ControlPath={control_path()}", "-o", "ControlPersist=10m", *account_options(p)]
+    return ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-o", "ServerAliveInterval=30", *control_options(), *account_options(p)]
 
 def ssh_command_string(p: "Profile | None"=None) -> str:
     """The ssh command with its options as one string, for rsync's -e."""
@@ -214,13 +224,15 @@ def control_argv(p: Profile, operation: str) -> list:
     return [ssh_exe(), "-O", operation, "-o", f"ControlPath={control_path()}", *account_options(p), p.host]
 
 def connection_alive(p: Profile, timeout: int=5) -> bool:
-    """True when a shared connection to this account is open (from Connect…, or from the terminal command). Contacts no host."""
-    if not p.host: return False
+    """True when a shared connection to this account is open (from Connect…, or from the terminal command). Contacts no host.
+    Always False where ssh cannot share a connection (Windows): there each command logs in with a key."""
+    if not p.host or not shares_connection(): return False
     try: return subprocess.run(control_argv(p, "check"), capture_output=True, stdin=subprocess.DEVNULL, timeout=timeout).returncode == 0
     except (OSError, subprocess.TimeoutExpired): return False
 
 def close_connection(p: Profile, timeout: int=10) -> bool:
     """Closes the shared connection (the cluster sees a normal logout). True when it is closed afterwards."""
+    if not shares_connection(): return True
     try: subprocess.run(control_argv(p, "exit"), capture_output=True, stdin=subprocess.DEVNULL, timeout=timeout)
     except (OSError, subprocess.TimeoutExpired): pass
     return not connection_alive(p)
@@ -228,6 +240,53 @@ def close_connection(p: Profile, timeout: int=10) -> bool:
 def can_login_here() -> bool:
     """Connect… needs a pseudo-terminal, which ssh insists on for passwords: macOS and Linux have one, Windows does not."""
     return os.name == "posix"
+
+## Key login, for computers where the window cannot relay a password (Windows): a small program that runs in its own console window, so
+## ssh-keygen and ssh ask their questions there (passphrase, cluster password, host key) and the GUI never sees the answers. It creates
+## ~/.ssh/id_ed25519 if there is no key yet, adds the public key to ~/.ssh/authorized_keys on the cluster (once, never twice), and checks
+## that a command now logs in without a password (BatchMode, as every command of the GUI).
+KEY_HELPER = r'''
+import json, os, subprocess, sys
+ssh, target = json.loads(sys.argv[1]), json.loads(sys.argv[2])
+key = os.path.join(os.path.expanduser("~"), ".ssh", "id_ed25519")
+def pause(code):
+    try: input("\nPress Enter to close this window.")
+    except EOFError: pass
+    sys.exit(code)
+print("SCOPE GUI: set up key login to " + target[-1] + "\n")
+existing = [k for k in ("id_ed25519", "id_ecdsa", "id_rsa") if os.path.isfile(os.path.join(os.path.dirname(key), k + ".pub"))]
+if existing: key = os.path.join(os.path.dirname(key), existing[0]); print("Using your existing key " + key + ".pub")
+else:
+    os.makedirs(os.path.dirname(key), exist_ok=True)
+    print("Creating a key (" + key + "). When asked for a passphrase, press Enter twice for none:")
+    print("the window needs a key it can use without asking. (With a passphrase, start the 'OpenSSH Authentication Agent' service and run ssh-add.)\n")
+    if subprocess.run(["ssh-keygen", "-t", "ed25519", "-f", key]).returncode != 0: print("ssh-keygen failed."); pause(1)
+pub = open(key + ".pub", encoding="utf-8").read().strip()
+remote = 'umask 077; mkdir -p ~/.ssh; touch ~/.ssh/authorized_keys; K=$(cat); grep -qxF "$K" ~/.ssh/authorized_keys || echo "$K" >> ~/.ssh/authorized_keys; echo SCOPE_GUI_KEY_OK'
+print("\nCopying the public key to the cluster. Answer the cluster's questions here (its password, or a code); nothing is stored.\n")
+done = subprocess.run(ssh + target + [remote], input=pub + "\n", text=True, stdout=subprocess.PIPE)
+if done.returncode != 0 or "SCOPE_GUI_KEY_OK" not in done.stdout: print("\nThe key could not be added (exit code " + str(done.returncode) + ")."); pause(1)
+check = subprocess.run(ssh + ["-o", "BatchMode=yes"] + target + ["echo SCOPE_GUI_LOGIN_OK"], text=True, stdout=subprocess.PIPE, stdin=subprocess.DEVNULL)
+if "SCOPE_GUI_LOGIN_OK" in check.stdout: print("\nDone: the cluster now accepts this computer's key. Go back to the window and press Test connection."); pause(0)
+print("\nThe key was added, but a login without password still fails. The cluster may not accept keys, or the key has a passphrase and no agent holds it."); pause(1)
+'''
+
+def key_setup_argv(p: Profile) -> list:
+    """The command that opens the key-login helper (see KEY_HELPER) for this account. It is started in its own console window."""
+    target = [*account_options(p), p.host]
+    return [sys.executable, "-I", "-c", KEY_HELPER, json.dumps([ssh_exe(), "-o", "ConnectTimeout=20"]), json.dumps(target)]
+
+def open_key_setup(p: Profile) -> "Result":
+    """Starts the key-login helper in a console window of its own (Windows) and returns at once. Result(-1) when it cannot be started."""
+    kw = {"creationflags": getattr(subprocess, "CREATE_NEW_CONSOLE", 0)} if os.name == "nt" else {}
+    try: subprocess.Popen(key_setup_argv(p), **kw); return Result(0)
+    except OSError as exc: return Result(-1, "", str(exc))
+
+def key_setup_command(p: Profile) -> str:
+    """The same as the helper, as commands to type in PowerShell (shown in the window for those who prefer to do it themselves)."""
+    target = " ".join([*[shlex.quote(o) for o in account_options(p)], p.host])
+    return ("ssh-keygen -t ed25519    # only if you have no key yet; press Enter twice for no passphrase\n"
+            f"Get-Content $HOME\\.ssh\\id_ed25519.pub | ssh {target} \"umask 077; mkdir -p ~/.ssh; cat >> ~/.ssh/authorized_keys\"")
 
 def auth_failed(res: "Result") -> bool:
     """True when a command failed only because the cluster wants a login (no key, no open shared connection)."""
@@ -514,7 +573,7 @@ def evaluate_probe(p: Profile, result: Result, local_version: str="", local_comm
                 checks.append(Check("Scheduler commands", "fail" if missing else "ok", ("missing: " + ", ".join(missing)) if missing else ", ".join(needed) + " found"))
             expected = {k: os.path.join(expand_home(p.remote_root, info.get("home", "")).rstrip("/"), v) + "/" for k, v in (("sources", "Sources"), ("systems", "Systems"), ("computations", "Computations"))}
             off = [k for k in expected if os.path.normpath(env[k]) != os.path.normpath(expected[k])]
-            checks.append(Check("Folder layout", "warn" if off else "ok", ("The environment's " + ", ".join(off) + " folder is not <project folder>/" + "/".join(v.capitalize() for v in off) + ". `scope set_path` would use a different layout from the environment.") if off else "Sources, Systems and Computations are inside the project folder"))
+            checks.append(Check("Folder layout", ("fail" if "systems" in off else "warn") if off else "ok", ("The environment's " + ", ".join(off) + " folder is not <project folder>/" + "/".join(v.capitalize() for v in off) + ". `scope set_path` would use a different layout from the environment.") if off else "Sources, Systems and Computations are inside the project folder"))
             gone = [k for k, ok in info.get("folders", {}).items() if not ok]
             if gone: checks.append(Check("Environment folders exist", "fail", "missing: " + ", ".join(gone)))
             for light in lights_from_probe(info)[1:]: checks.append(Check(light.name, {"green": "ok", "amber": "warn", "red": "fail", "grey": "warn"}[light.state], light.detail))
@@ -551,8 +610,82 @@ def remote_dirs_script(p: Profile, system: str) -> str:
     root = shell_path(p.remote_root.rstrip("/")); s = shlex.quote(system)
     return f"mkdir -p {root}/Sources/{s} {root}/Systems/{s} {root}/Computations/{s} {root}/inputs\n"
 
+##### without rsync (Windows): tar through ssh #####
+## Windows 10 and 11 come with ssh and tar but not rsync. Files then travel as a tar stream over one ssh command per batch: whole files,
+## no resume of an interrupted copy, nothing deleted. Dates are kept, so the next comparison sees the copies as up to date.
+TAR_BATCH = 200                                                             ## files per ssh command (keeps the command line short on Windows)
+
+def have_rsync() -> bool:
+    import shutil
+    return bool(shutil.which(rsync_exe()))
+
+def tar_exe() -> str:
+    import shutil
+    return os.environ.get("SCOPE_GUI_TAR") or shutil.which("tar") or "tar"
+
+def _batches(rels: list) -> list:
+    return [rels[i:i + TAR_BATCH] for i in range(0, len(rels), TAR_BATCH)] or [[]]
+
+def tar_push(p: Profile, local_dir: str, rels: list, remote_dir: str, timeout: int=24 * 3600) -> Result:
+    """Copies rels (paths under local_dir, '/'-separated) into remote_dir on the cluster, creating folders. Never deletes."""
+    if not rels: return Result(0)
+    lines = []
+    for batch in _batches(rels):
+        try:
+            pack = subprocess.Popen([tar_exe(), "-cf", "-", "-C", local_dir, *batch], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            done = subprocess.run(ssh_argv(p, f"mkdir -p {shell_path(remote_dir)} && tar -xf - -C {shell_path(remote_dir)}"), stdin=pack.stdout, capture_output=True, timeout=timeout)
+            pack.stdout.close(); err = pack.stderr.read().decode("utf-8", "replace"); pack.wait(timeout=60)
+        except subprocess.TimeoutExpired: return Result(-2, "", "Timed out")
+        except OSError as exc: return Result(-1, "", str(exc))
+        if done.returncode != 0 or pack.returncode != 0:
+            return Result(done.returncode or pack.returncode, "\n".join(lines), (err + done.stderr.decode("utf-8", "replace")).strip())
+        lines += [f">f {r}" for r in batch]
+    return Result(0, "\n".join(lines))
+
+def tar_pull(p: Profile, remote_dir: str, rels: list, local_dir: str, timeout: int=24 * 3600) -> Result:
+    """Copies rels (paths under remote_dir on the cluster) into local_dir, creating folders. Never deletes."""
+    if not rels: return Result(0)
+    os.makedirs(local_dir, exist_ok=True); lines = []
+    for batch in _batches(rels):
+        cmd = f"tar -cf - -C {shell_path(remote_dir)} -- " + " ".join(shlex.quote(r) for r in batch)
+        try:
+            fetch = subprocess.Popen(ssh_argv(p, cmd), stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL)
+            done = subprocess.run([tar_exe(), "-xf", "-", "-C", local_dir], stdin=fetch.stdout, capture_output=True, timeout=timeout)
+            fetch.stdout.close(); err = fetch.stderr.read().decode("utf-8", "replace"); fetch.wait(timeout=60)
+        except subprocess.TimeoutExpired: return Result(-2, "", "Timed out")
+        except OSError as exc: return Result(-1, "", str(exc))
+        if done.returncode != 0 or fetch.returncode != 0:
+            return Result(fetch.returncode or done.returncode, "\n".join(lines), (err + done.stderr.decode("utf-8", "replace")).strip())
+        lines += [f">f {r}" for r in batch]
+    return Result(0, "\n".join(lines))
+
+def _remote_path(p: Profile, dst: str) -> str:
+    return dst[len(p.host) + 1:] if dst.startswith(p.host + ":") else dst
+
+def _local_rels(folder: str, excludes: list) -> list:
+    import fnmatch
+    out = []
+    for root, dirs, files in os.walk(folder):
+        dirs[:] = [d for d in dirs if not any(fnmatch.fnmatch(d + "/", e) or fnmatch.fnmatch(d, e.rstrip("/")) for e in excludes)]
+        for f in files:
+            if any(fnmatch.fnmatch(f, e) for e in excludes): continue
+            out.append(os.path.relpath(os.path.join(root, f), folder).replace(os.sep, "/"))
+    return sorted(out)
+
+def tar_sync_item(p: Profile, src: str, dst: str, dry_run: bool) -> tuple:
+    """One upload item without rsync: a folder (src ends with '/') or one file. Returns (Result, lines)."""
+    remote = _remote_path(p, dst)
+    if src.endswith("/") or src.endswith(os.sep): local_dir, rels, remote_dir = src, _local_rels(src, DEFAULT_EXCLUDES), remote
+    else: local_dir, rels, remote_dir = os.path.dirname(src), [os.path.basename(src)], (remote if remote.endswith("/") else remote.rsplit("/", 1)[0] + "/")
+    if dry_run: return Result(0, "\n".join(f">f {r}" for r in rels)), [f">f {r}  (no rsync here: whole files are copied)" for r in rels]
+    res = tar_push(p, local_dir, rels, remote_dir)
+    return res, [l for l in res.stdout.splitlines() if l.strip()]
+
 def sync(items: list, dry_run: bool, p: "Profile | None"=None) -> list:
-    """Runs rsync for each item, through the profile's port and user. Returns a list of (kind, Result, lines) where lines are the itemized changes."""
+    """Runs rsync for each item, through the profile's port and user. Returns a list of (kind, Result, lines) where lines are the itemized changes.
+    Without rsync (Windows) the items are copied as tar streams over ssh (tar_sync_item)."""
+    if p is not None and not have_rsync():
+        return [(kind, *tar_sync_item(p, src, dst, dry_run)) for src, dst, kind in items]
     out = []
     for src, dst, kind in items:
         try:
@@ -580,6 +713,7 @@ def run_script_text(p: Profile, system: str, remote_inputs: list, quiet: bool=Fa
 ### Runs on the cluster that outlive us ###
 ############################################
 STARTED, BUSY, SIZE, ALIVE, BEGIN, RUNLINE = "__SCOPE_GUI_STARTED__", "__SCOPE_GUI_BUSY__", "__SCOPE_GUI_SIZE__", "__SCOPE_GUI_ALIVE__", "__SCOPE_GUI_BEGIN__", "__SCOPE_GUI_RUN__"
+MISSING = "__SCOPE_GUI_MISSING__"
 EXIT_MARKER_REMOTE = backend.EXIT_MARKER
 
 def pid_name(system: str) -> str:
@@ -595,7 +729,7 @@ def _common(p: Profile, system: str="") -> list:
     if system: lines += [f"N={pid_name(system)}", 'PIDF="$ROOT"/logs/run_"$N".pid', 'LOCK="$ROOT"/logs/run_"$N".lock']
     return lines
 
-def detached_run_script(p: Profile, system: str, remote_inputs: list, quiet: bool=False, verbose: bool=False, errors: bool=False, set_path: bool=True, stamp: str="") -> str:
+def detached_run_script(p: Profile, system: str, remote_inputs: list, quiet: bool=False, verbose: bool=False, errors: bool=False, set_path: bool=True, stamp: str="", check_files: bool=False) -> str:
     """Starts `scope run` on the cluster so that it does not depend on this window or on the SSH connection.
 
     One run per system at a time: the lock is a folder (`mkdir` is atomic, so two starts at the same moment cannot both get it). The run is
@@ -603,12 +737,34 @@ def detached_run_script(p: Profile, system: str, remote_inputs: list, quiet: boo
     <project>/logs/run_<system>_<time>.log; its pid is kept in <project>/logs/run_<system>.pid. When it ends, or is stopped, it appends
     `__SCOPE_GUI_EXIT__ <code>` to the log and removes the pid file and the lock. If the connection drops, the run goes on.
     Prints `__SCOPE_GUI_STARTED__ <pid> <log>`, or `__SCOPE_GUI_BUSY__ <pid>` if a run of that system is active (`starting` when another start holds the lock).
+    check_files (the Run button): first checks, in the same connection, what `scope set_path` and `scope run` will need, and starts nothing
+    when one is missing, printing `__SCOPE_GUI_MISSING__ <kind> <path>` for each:
+      envdir  the environment file keeps its systems in <path>, not in <project>/Systems where Upload puts them (an environment of
+              another project folder: SCOPE would never find the uploaded system);
+      system  the system file is not where SCOPE reads it (<environment's Systems>/<system>/<system>.npy): not uploaded yet;
+      input   an input file is not uploaded.
+    The environment is read with SCOPE's own Python, as the connection test does; if that fails, <project>/Systems is assumed.
     """
     import time
-    stamp = stamp or time.strftime("%Y%m%d_%H%M%S")
+    from scope.gui.backend import unique_stamp
+    stamp = stamp or unique_stamp()                                         ## date_time_id: two starts in one second never share a log
     inner = run_script_text(p, system, remote_inputs, quiet, verbose, errors, set_path)
     wrapper = 'trap true TERM; bash "$1" > "$2" 2>&1 < /dev/null; echo "' + EXIT_MARKER_REMOTE + ' $?" >> "$2"; rm -rf "$3" "$4"'      ## TERM: let the run end, then still write the marker and free the lock
-    lines = ["set -e", *_common(p, system), 'mkdir -p "$ROOT"/logs',
+    check = []
+    if check_files:
+        q = shlex.quote(system); act = "".join(f"{{ {a}; }} >/dev/null 2>&1; " for a in activation_lines(p))
+        read_env = ("from scope.read_write import load_binary; import sys, io, contextlib\n"
+                    "with contextlib.redirect_stdout(io.StringIO()): e = load_binary(sys.argv[1])\nprint(e.systems_path)")
+        check = ["MISSING=0",
+                 f'SYS="$({act}SCOPE={scope_program(p)}; PY="$(dirname "$(command -v "$SCOPE" 2>/dev/null || echo "$SCOPE")")/python"; [ -x "$PY" ] || PY=python3; '
+                 f'"$PY" -c {shlex.quote(read_env)} {shell_path(p.remote_env)} 2>/dev/null | tail -n 1)" || SYS=""',
+                 '[ -n "$SYS" ] || SYS="$ROOT"/Systems', 'SYS="${SYS%/}"',
+                 'A="$(cd "$SYS" 2>/dev/null && pwd -P || echo "$SYS")"; B="$(cd "$ROOT"/Systems 2>/dev/null && pwd -P || echo "$ROOT"/Systems)"',
+                 f'[ "$A" = "$B" ] || {{ echo "{MISSING} envdir $SYS"; MISSING=1; }}',
+                 f'[ -f "$SYS"/{q}/{q}.npy ] || {{ echo "{MISSING} system $SYS/"{q}/{q}.npy; MISSING=1; }}',
+                 *[f'[ -f {shell_path(i)} ] || {{ echo "{MISSING} input "{shell_path(i)}; MISSING=1; }}' for i in remote_inputs],
+                 '[ "$MISSING" = 0 ] || exit 0']                            ## before the lock: nothing to clean up
+    lines = ["set -e", *_common(p, system), *check, 'mkdir -p "$ROOT"/logs',
              'if ! mkdir "$LOCK" 2>/dev/null; then',
              '  if [ -f "$PIDF" ] && alive "$(cat "$PIDF")" "$N"; then echo "' + BUSY + ' $(cat "$PIDF")"; exit 0; fi',
              '  if [ -z "$(find "$LOCK" -maxdepth 0 -mmin +1 2>/dev/null)" ]; then echo "' + BUSY + ' starting"; exit 0; fi',      ## a start in progress (no pid yet); older than a minute means a start that died
@@ -623,7 +779,10 @@ def detached_run_script(p: Profile, system: str, remote_inputs: list, quiet: boo
     return "\n".join(lines) + "\n"
 
 def parse_started(stdout: str) -> dict:
-    """{'state': 'started', 'pid': ..., 'log': ...}, {'state': 'busy', 'pid': ...} or {} when the script printed neither."""
+    """{'state': 'started', 'pid': ..., 'log': ...}, {'state': 'busy', 'pid': ...}, {'state': 'missing', 'files': [(kind, path), ...]}
+    (files not uploaded: nothing started) or {} when the script printed none of these."""
+    missing = [tuple(line.split(None, 2)[1:]) for line in stdout.splitlines() if line.startswith(MISSING + " ") and len(line.split(None, 2)) == 3]
+    if missing: return {"state": "missing", "files": missing}
     for line in stdout.splitlines():
         if line.startswith(STARTED):
             parts = line.split(None, 2)
@@ -728,10 +887,10 @@ class QueuedJob:
         if s.upper() in ("RUNNING", "CONFIGURING", "COMPLETING", "STAGE_OUT", "SIGNALING", "RESIZING") or s in ("r", "t", "Rr", "Rt"): return "running"
         return s.lower() or "unknown"
 
-LOG_NAME = re.compile(r"^run_(.+)_(\d{8})_(\d{6})\.log$")
+LOG_NAME = re.compile(r"^run_(.+?)_(\d{8})_(\d{6})(?:_([0-9a-f]{6}))?\.log$")            ## the id after the time is new (older logs have none)
 
 def log_system(path: str) -> str:
-    """The system (pid_name form) of a cluster run log <project>/logs/run_<system>_<YYYYmmdd>_<HHMMSS>.log, or ''."""
+    """The system (pid_name form) of a cluster run log <project>/logs/run_<system>_<YYYYmmdd>_<HHMMSS>[_<id>].log, or ''."""
     m = LOG_NAME.match(os.path.basename(path.rstrip("/")))
     return m.group(1) if m else ""
 

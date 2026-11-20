@@ -153,69 +153,70 @@ class EnvironmentTab(QWidget):
 ###################
 ### Systems tab ###
 ###################
-class SystemsTab(QWidget):
-    def __init__(self, session: Session):
-        super().__init__()
-        self.session = session
-        self.rows    = []
-        self.table   = QTableWidget(0, 4); self.table.setHorizontalHeaderLabels(["System", "Binary", "Finished branches", "Terminated branches"])
-        self.table.setSelectionBehavior(QAbstractItemView.SelectRows); self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
-        self.table.itemSelectionChanged.connect(self.show_details)
-        from scope.gui.structure_view import StructurePanel
-        self.structure = StructurePanel()                                        ## the structure SCOPE will compute: 3D view, formula, states, 2D drawing
-        refresh = QPushButton("Refresh"); refresh.clicked.connect(session.systemsChanged.emit)          ## through the session, so the cached list is scanned again
-        imp     = QPushButton("Import .xyz…"); imp.setProperty("primary", True); imp.clicked.connect(self.import_xyz)
-        row = QHBoxLayout(); row.addWidget(imp); row.addWidget(refresh); row.addStretch(1)
-        split = QSplitter(Qt.Vertical); split.addWidget(self.table); split.addWidget(self.structure); split.setStretchFactor(0, 1); split.setStretchFactor(1, 3)
-        lay = QVBoxLayout(self); lay.addLayout(row); lay.addWidget(split, 1)
-        session.systemsChanged.connect(self.refresh)
-
-    def refresh(self) -> None:
-        self.rows = self.session.systems()
-        self.table.setRowCount(len(self.rows))
-        for i, r in enumerate(self.rows):
-            for j, text in enumerate([r.name, "yes" if r.file else "missing", ", ".join(r.finished), ", ".join(r.terminated)]): self.table.setItem(i, j, QTableWidgetItem(text))
-        self.structure.clear("Import a system to see its structure here." if not self.rows else "")
-        if self.rows: self.table.selectRow(0)                                     ## show a structure straight away
-
-    def import_xyz(self) -> None:
-        if not self.session.env: QMessageBox.information(self, "No environment", "Create or open an environment first."); return
-        paths, _ = QFileDialog.getOpenFileNames(self, "Import .xyz files", self.session.info.sources_path, "XYZ files (*.xyz)")
-        for p in paths:
-            try: backend.import_xyz(self.session.env, p)
-            except Exception as exc: QMessageBox.warning(self, "Import failed", f"{os.path.basename(p)}: {exc}")
-        self.session.systemsChanged.emit()
-
-    def show_details(self) -> None:
-        """Shows the selected system: its structures (sources and states) in the structure panel, and SCOPE's own description under 'SCOPE details…'."""
-        from scope.gui import structure
-        sel = self.table.selectionModel().selectedRows()
-        if not sel: return
-        r = self.rows[sel[0].row()]
-        try: details = backend.system_details(r.file) if r.file else "No system binary in this folder."
-        except Exception as exc: details = f"Cannot read {r.file}\n{type(exc).__name__}: {exc}"
-        found = structure.structures_for(r, self.session.info.sources_path if self.session.info else "")
-        if found: self.structure.set_structures(found, details, r.name)
-        else: self.structure.clear("No structure could be read for this system.", details)
+from scope.gui.systems_view import SystemsTab        # noqa: E402  (System -> Source -> State tree, charge and spin)
 
 ####################
 ### Pipeline tab ###
 ####################
 class GraphView(QGraphicsView):
-    """Draws the pipeline left to right: one box per job, an arrow A -> B when B must wait for A to finish.
+    addAfter     = Signal(str)                                                   ## node id: add a job that runs after this one
+    editRequested = Signal(str)                                                  ## node id: open its input file in the form
+    linkRequested = Signal(str, str)                                             ## (A, B): a drag from job A onto job B, "B waits for A"
 
-    Dashed red arrows mean A blocks B (constrains). A box with a dashed orange border is a job that no loaded file
-    defines. A red badge marks a job that lists itself as a requisite (it would never start).
+    """Draws the pipeline left to right as SCOPE's manuscript does: jobs (boxes) and the States they read and write (pills).
+
+    State -> job: the job starts from that geometry (istate). Job -> state: the job writes it (fstate). A dashed arrow back from a job to
+    the state it read means the job adds its results to that state (a freq job on the optimised geometry). Dotted grey arrows are
+    requisites (B waits for A, timing only); dashed red arrows mean A blocks B (constrains). A pill with a dashed border is a state no
+    loaded job writes ('initial', or one that must already exist). A box with a dashed orange border is a job no loaded file defines.
+    A red badge marks a job that lists itself as a requisite (it would never start).
     """
     def __init__(self):
         self._scene = QGraphicsScene()                    ## kept in an attribute: PySide6 deletes a scene that only the view references
-        super().__init__(self._scene)
+        super().__init__(self._scene); self.jobs, self.boxes, self.drag_from, self.drag_line = set(), {}, None, None
         self.setRenderHint(QPainter.Antialiasing)
         self.setMinimumHeight(220)
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event); self.fit()
+
+    def node_at(self, pos) -> str:
+        """The job (node id) under a point of the view, or ''."""
+        for item in self.items(pos):
+            if item.data(0): return str(item.data(0))
+        return ""
+
+    def contextMenuEvent(self, event) -> None:
+        node = self.node_at(event.pos())
+        if not node or node not in self.jobs: return
+        menu = QMenu(self); job = node.rsplit("/", 1)[-1]
+        menu.addAction(f"Add a job after '{job}'…", lambda: self.addAfter.emit(node)); menu.addAction("Edit its input file…", lambda: self.editRequested.emit(node))
+        menu.exec(event.globalPos())
+
+    ##### drag from job A onto job B: "B waits for A" (the page shows what changes and asks before writing) #####
+    def mousePressEvent(self, event) -> None:
+        node = self.node_at(event.position().toPoint())
+        if event.button() == Qt.LeftButton and node in self.jobs: self.drag_from = node; event.accept(); return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:
+        if not self.drag_from: super().mouseMoveEvent(event); return
+        start, end = self.boxes[self.drag_from].center(), self.mapToScene(event.position().toPoint())
+        if self.drag_line is None: self.drag_line = self._scene.addLine(start.x(), start.y(), end.x(), end.y(), QPen(QColor(theme.colors()["accent"]), 2.4, Qt.DashLine))
+        else: self.drag_line.setLine(start.x(), start.y(), end.x(), end.y())
+        target = self.node_at(event.position().toPoint()); self.viewport().setCursor(Qt.DragLinkCursor if target in self.jobs and target != self.drag_from else Qt.ClosedHandCursor)
+
+    def mouseReleaseEvent(self, event) -> None:
+        if not self.drag_from: super().mouseReleaseEvent(event); return
+        a, self.drag_from = self.drag_from, None; self.viewport().unsetCursor()
+        if self.drag_line is not None: self._scene.removeItem(self.drag_line); self.drag_line = None
+        b = self.node_at(event.position().toPoint())
+        if b in self.jobs and b != a: self.linkRequested.emit(a, b)
+
+    def mouseDoubleClickEvent(self, event) -> None:
+        node = self.node_at(event.position().toPoint())
+        if node in self.jobs: self.editRequested.emit(node)
+        else: super().mouseDoubleClickEvent(event)
 
     def fit(self) -> None:
         rect = self._scene.itemsBoundingRect()
@@ -223,31 +224,59 @@ class GraphView(QGraphicsView):
         self.fitInView(rect.adjusted(-30, -30, 30, 30), Qt.KeepAspectRatio)
         if self.transform().m11() > 1.3: self.resetTransform(); self.scale(1.3, 1.3); self.centerOn(rect.center())
 
-    def draw(self, reports: list) -> None:
+    def draw(self, reports: list, sources: "list | None"=None) -> None:
         scene = self._scene; scene.clear()
-        nodes, edges, cycles = backend.build_graph(reports)
+        nodes, edges, cycles = backend.state_graph(reports, sources)
+        self.jobs = {r.node for r in reports if r.ok}                             ## the boxes that have a file (right-click, double-click, drag)
+        self.boxes, self.drag_from, self.drag_line = {}, None, None
         place  = backend.layout_graph(nodes, edges)
         c      = theme.colors()
-        ink, arrow, red = QColor(c["text"]), QColor(c["edge"]), QColor(c["constrain"])
-        W, H, GX, GY = 200, 62, 90, 36
-        pos    = {n: QPointF(c * (W + GX), r * (H + GY)) for n, (c, r) in place.items()}
-        for a, b, kind in edges:
-            p1, p2 = pos[a] + QPointF(W, H / 2), pos[b] + QPointF(0, H / 2)
-            pen = QPen(red if kind == "constrain" else arrow, 2.4, Qt.DashLine if kind == "constrain" else Qt.SolidLine)
-            scene.addLine(p1.x(), p1.y(), p2.x(), p2.y(), pen)
+        ink, arrow, red, sub_ink = QColor(c["text"]), QColor(c["edge"]), QColor(c["constrain"]), QColor(c["sub"])
+        W, H, SW, SH, GX, GY = 210, 78, 130, 34, 60, 30
+        rect = {}
+        for n, (col, row) in place.items():
+            x, y = col * (W + GX), row * (H + GY)
+            rect[n] = (x + (W - SW) / 2, y + (H - SH) / 2, SW, SH) if nodes[n][0] in ("state", "given") else (x, y, W, H)
+        def arrowhead(p1, p2, colour):
             d = p2 - p1; n = (d.x() ** 2 + d.y() ** 2) ** 0.5 or 1; ux, uy = d.x() / n, d.y() / n
-            l = QPointF(-ux * 14 - uy * 6, -uy * 14 + ux * 6); r = QPointF(-ux * 14 + uy * 6, -uy * 14 - ux * 6)
-            scene.addPolygon(QPolygonF([p2, p2 + l, p2 + r]), QPen(pen.color()), QBrush(pen.color()))
+            l = QPointF(-ux * 12 - uy * 5, -uy * 12 + ux * 5); r = QPointF(-ux * 12 + uy * 5, -uy * 12 - ux * 5)
+            scene.addPolygon(QPolygonF([p2, p2 + l, p2 + r]), QPen(colour), QBrush(colour))
+        for a, b, kind in edges:
+            (ax, ay, aw, ah), (bx, by, bw, bh) = rect[a], rect[b]
+            if kind == "updates":                                                ## back to the state it read, under both boxes
+                p1, p2 = QPointF(ax + aw / 2, ay + ah), QPointF(bx + bw / 2, by + bh)
+                low = max(ay + ah, by + bh) + 18; pen = QPen(arrow, 1.8, Qt.DashLine)
+                for s, e in ((p1, QPointF(p1.x(), low)), (QPointF(p1.x(), low), QPointF(p2.x(), low)), (QPointF(p2.x(), low), p2)): scene.addLine(s.x(), s.y(), e.x(), e.y(), pen)
+                arrowhead(QPointF(p2.x(), low), p2, arrow); continue
+            p1, p2 = QPointF(ax + aw, ay + ah / 2), QPointF(bx, by + bh / 2)
+            colour = red if kind == "constrain" else (sub_ink if kind == "requisite" else arrow)
+            style  = {"constrain": Qt.DashLine, "requisite": Qt.DotLine}.get(kind, Qt.SolidLine)
+            pen = QPen(colour, 1.6 if kind == "requisite" else 2.4, style)
+            scene.addLine(p1.x(), p1.y(), p2.x(), p2.y(), pen); arrowhead(p1, p2, colour)
         selfish = {r.node for r in reports if r.ok and r.job in r.requisites}
-        for n, kind in nodes.items():
+        for n, (kind, label) in nodes.items():
+            x, y, w, h = rect[n]
+            if kind in ("state", "given"):
+                pen = QPen(QColor(c["accent"]), 1.8, Qt.DashLine if kind == "given" else Qt.SolidLine)
+                from PySide6.QtGui import QPainterPath
+                pill = QPainterPath(); pill.addRoundedRect(x, y, w, h, h / 2, h / 2); scene.addPath(pill, pen, QBrush(QColor(c["base"])))
+                t = scene.addText(label); f = t.font(); f.setItalic(kind == "given"); t.setFont(f); t.setDefaultTextColor(ink)
+                t.setPos(x + (w - t.boundingRect().width()) / 2, y + (h - t.boundingRect().height()) / 2)
+                t.setToolTip(f"State '{label}'" + (": written by none of the loaded jobs (it must already exist in the system)" if kind == "given" else ""))
+                continue
             fill = QColor(c["node"]) if kind == "job" else QColor(c["node_missing"])
             pen  = QPen(QColor(c["warn"]), 2, Qt.DashLine) if kind == "missing" else QPen(QColor(c["edge"]), 1.5)
-            scene.addRect(pos[n].x(), pos[n].y(), W, H, pen, QBrush(fill))
+            box = scene.addRect(x, y, w, h, pen, QBrush(fill)); box.setData(0, n); self.boxes[n] = box.rect()
             report = next((r for r in reports if r.ok and r.node == n), None)
-            title  = scene.addText(n); f = title.font(); f.setBold(True); f.setPointSize(13); title.setFont(f); title.setDefaultTextColor(QColor(c["node_text"])); title.setPos(pos[n].x() + 6, pos[n].y() + 4)
-            sub    = scene.addText(f"{report.software}  {report.comp_type}  ({report.procs} proc)" if report else "not defined in a loaded file"); sub.setDefaultTextColor(QColor(c["node_text"])); sub.setPos(pos[n].x() + 6, pos[n].y() + 30)
+            if report: box.setToolTip("Drag onto another job: that job waits for this one and starts from its result.\nRight-click: add a job after this one, or edit its file. Double-click: edit its file.")
+            branch, workflow = n.split("/")[0], "/".join(n.split("/")[1:-1])
+            title  = scene.addText(label); f = title.font(); f.setBold(True); f.setPointSize(13); title.setFont(f); title.setDefaultTextColor(QColor(c["node_text"])); title.setPos(x + 6, y + 2)
+            where  = scene.addText(f"branch {branch} · sources {workflow}"); where.setDefaultTextColor(QColor(c["node_text"])); where.setPos(x + 6, y + 26)
+            sub    = scene.addText(f"{report.software}  {report.comp_type}  ({report.procs} proc)" if report else "not defined in a loaded file"); sub.setDefaultTextColor(QColor(c["node_text"])); sub.setPos(x + 6, y + 48)
+            for item in (title, where, sub): item.setData(0, n)
+            if report: title.setToolTip(f"{n}\nreads state '{report.istate}', writes state '{report.fstate}'\n{report.path}")
             if n in selfish:
-                badge = scene.addText("requires itself: never starts"); badge.setDefaultTextColor(red); bf = badge.font(); bf.setBold(True); badge.setFont(bf); badge.setPos(pos[n].x(), pos[n].y() + H + 2)
+                badge = scene.addText("requires itself: never starts"); badge.setDefaultTextColor(red); bf = badge.font(); bf.setBold(True); badge.setFont(bf); badge.setPos(x, y + h + 2)
         if not nodes: scene.addText("No valid input files yet. Use 'New input…' or 'Add input files…'.").setDefaultTextColor(ink)
         scene.setSceneRect(scene.itemsBoundingRect().adjusted(-30, -30, 30, 30)); self.fit()
 
@@ -255,39 +284,126 @@ class PipelineTab(QWidget):
     def __init__(self, session: Session):
         super().__init__()
         self.session = session
-        self.table   = QTableWidget(0, 6); self.table.setHorizontalHeaderLabels(["File", "Branch/Job", "Software", "Type", "Submit?", "Status"])
+        self.table   = QTableWidget(0, 8); self.table.setHorizontalHeaderLabels(["File", "Branch / sources / job", "Reads state", "Writes state", "Software", "Type", "Submit?", "Status"])
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows); self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.graph   = GraphView()
         new    = QPushButton("New input…"); new.setProperty("primary", True); new.clicked.connect(self.new_input)
         edit   = QPushButton("Edit selected…"); edit.clicked.connect(self.edit_selected)
+        after  = QPushButton("Add job after selected…"); after.clicked.connect(self.add_after_selected)
+        chain  = QPushButton("Chain selected…"); chain.clicked.connect(self.chain_selected)
+        review = QPushButton("Review…"); review.clicked.connect(self.review)
+        review.setToolTip("Every input file as it will run with this workspace's environment: job, type, states, what it waits for, processors, queue, whether it submits, and what needs a look.")
+        chain.setToolTip("Select two or more jobs (Cmd/Ctrl- or Shift-click in the table): each will wait for the previous one and start from its result. You choose the order and see every change before saving.")
+        after.setToolTip("A new input file for a job that runs after the selected one and starts from its result: same branch, sources, method and resources, filled in for you. You choose the job type and check it before saving.")
+        self.graph.linkRequested.connect(lambda a, b: self.link(self.report_of(a), self.report_of(b)))
+        self.graph.addAfter.connect(lambda node: self.add_after(self.report_of(node))); self.graph.editRequested.connect(lambda node: self.edit_path(self.report_of(node).path))
         add    = QPushButton("Add input files…"); add.clicked.connect(self.add)
         remove = QPushButton("Remove selected"); remove.clicked.connect(self.remove)
+        self.against = QComboBox(); self.against.setToolTip("The sources of this system decide exactly which jobs share a source (workflow selectors such as 'hs*' are matched against them). Without a system, selectors are compared by name only.")
+        self.against.currentIndexChanged.connect(self.refresh)
+        self.against.setMinimumContentsLength(12); self.against.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
         row = QHBoxLayout(); [row.addWidget(w) for w in (new, edit, add, remove)]; row.addStretch(1)
-        legend = QLabel("Read left to right: an arrow A → B means B starts only after A has finished (B's requisites). Dashed red = A blocks B (constrains). Orange dashed box = job not defined in a loaded file."); legend.setWordWrap(True)
+        row2 = QHBoxLayout(); [row2.addWidget(w) for w in (after, chain, review)]; row2.addStretch(1)
+        row3 = QHBoxLayout(); row3.addWidget(QLabel("Check against system")); row3.addWidget(self.against); row3.addStretch(1)
+        legend = QLabel("Drag from one job onto another to make the second wait for the first and start from its result (you see the change before it is saved). Read left to right. Pills are States of the sources: a job reads one (istate) and writes one (fstate); a dashed pill is a state no loaded job writes. "
+                        "Dotted grey arrow A → B: B starts only after A has finished (requisite: timing only, it does not choose B's geometry). Dashed red = A blocks B (constrains). "
+                        "Dashed arrow back to a state: the job adds its results to the state it read. Orange dashed box = job not defined in a loaded file."); legend.setWordWrap(True)
         self.issues = QLabel(); self.issues.setWordWrap(True); set_kind(self.issues, "warn")
         graph_box = QWidget(); gl = QVBoxLayout(graph_box); gl.setContentsMargins(0, 0, 0, 0); gl.addWidget(legend); gl.addWidget(self.graph, 1); gl.addWidget(self.issues)
         split = QSplitter(Qt.Vertical); split.addWidget(self.table); split.addWidget(graph_box); split.setStretchFactor(0, 1); split.setStretchFactor(1, 2)
-        lay = QVBoxLayout(self); lay.addLayout(row); lay.addWidget(split, 1)
-        session.inputsChanged.connect(self.refresh)
+        lay = QVBoxLayout(self); lay.addLayout(row); lay.addLayout(row2); lay.addLayout(row3); lay.addWidget(split, 1)
+        session.inputsChanged.connect(self.refresh); session.systemsChanged.connect(self.fill_systems)
+
+    def fill_systems(self) -> None:
+        current = self.against.currentText()
+        self.against.blockSignals(True); self.against.clear(); self.against.addItem("(none: compare names only)", "")
+        for r in self.session.systems():
+            if r.file: self.against.addItem(r.name, r.file)
+        i = self.against.findText(current); self.against.setCurrentIndex(max(i, 0)); self.against.blockSignals(False)
+        self.refresh()
+
+    def sources(self) -> "list | None":
+        from scope.gui import systems
+        file = self.against.currentData()
+        return systems.source_names(file) if file else None
 
     def start_dir(self) -> str:
         return os.path.dirname(self.session.info.filepath) if self.session.info else os.path.expanduser("~")
 
     def new_input(self) -> None:
         from scope.gui.editor import InputEditor
-        dialog = InputEditor(self, self.start_dir())
+        dialog = InputEditor(self, self.start_dir(), reports=self.session.reports)
+        if dialog.exec() and dialog.saved_path: self.session.add_inputs([dialog.saved_path])
+
+    def report_of(self, node: str) -> "backend.InputReport":
+        return next(r for r in self.session.reports if r.ok and r.node == node)
+
+    def add_after_selected(self) -> None:
+        rows = self.table.selectionModel().selectedRows()
+        if not rows: QMessageBox.information(self, "Nothing selected", "Select, in the table, the job the new one should follow (or right-click its box in the graph)."); return
+        report = self.session.reports[rows[0].row()]
+        if not report.ok: QMessageBox.information(self, "Not a valid input", "Fix this file first: SCOPE does not accept it, so nothing can follow it."); return
+        self.add_after(report)
+
+    def link(self, a: "backend.InputReport", b: "backend.InputReport") -> None:
+        """B waits for A and starts from A's result: shows exactly what changes in B's file and writes it only if the user agrees."""
+        from scope.gui.editor import LinkDialog
+        try: change = backend.link_jobs(a, b, self.session.reports, self.sources())
+        except ValueError as exc: QMessageBox.information(self, "These jobs cannot be linked", str(exc)); return
+        except OSError as exc: QMessageBox.warning(self, "Cannot read file", str(exc)); return
+        if LinkDialog(self, a.job, b.job, change).exec() != QDialog.Accepted: return
+        try:
+            with open(change.path, "w") as fh: fh.write(change.new_text)
+        except OSError as exc: QMessageBox.warning(self, "Not saved", str(exc)); return
+        self.session.add_inputs([change.path])
+
+    def review(self) -> None:
+        from scope.gui.review_view import ReviewDialog
+        i = self.session.info
+        where = f"With environment '{i.name}' ({i.scheduler}):" if i else "No environment yet: queues and submission are not checked."
+        ReviewDialog(self, backend.review_rows(self.session.reports, i.scheduler if i else "", i.queues if i else None, self.sources()), where).exec()
+
+    def chain_selected(self) -> None:
+        rows = sorted(i.row() for i in self.table.selectionModel().selectedRows())
+        chosen = [self.session.reports[i] for i in rows]
+        if len(chosen) < 2: QMessageBox.information(self, "Select several jobs", "Select two or more jobs in the table (Cmd/Ctrl- or Shift-click). They will run one after the other, each from the previous one's result."); return
+        if any(not r.ok for r in chosen): QMessageBox.information(self, "Not valid inputs", "Fix the files SCOPE does not accept first."); return
+        self.chain(backend.chain_order(chosen, self.sources()))
+
+    def chain(self, ordered: list) -> None:
+        """Shows the chain (reorderable) and every change it makes; writes the changed files only if the user saves."""
+        from scope.gui.editor import ChainDialog
+        dialog = ChainDialog(self, ordered, self.session.reports, self.sources())
+        if dialog.exec() != QDialog.Accepted or not dialog.links: return
+        written = []
+        for change in dialog.links:
+            try:
+                with open(change.path, "w") as fh: fh.write(change.new_text)
+                written.append(change.path)
+            except OSError as exc: QMessageBox.warning(self, "Not saved", f"{change.path}: {exc}"); break
+        if written: self.session.add_inputs(written)
+
+    def add_after(self, report: "backend.InputReport") -> None:
+        """A new input file for a job that waits for `report`'s job and starts from its result, with everything else copied (see
+        backend.followup_form). Nothing is saved until the user checks the form and presses Save; nothing is run."""
+        from scope.gui.editor import InputEditor
+        try: form, extras = backend.followup_form(report, self.session.reports)
+        except OSError as exc: QMessageBox.warning(self, "Cannot read file", str(exc)); return
+        dialog = InputEditor(self, os.path.dirname(report.path), form, extras, reports=self.session.reports, after=report.job)
         if dialog.exec() and dialog.saved_path: self.session.add_inputs([dialog.saved_path])
 
     def edit_selected(self) -> None:
-        from scope.gui.editor import InputEditor
         rows = self.table.selectionModel().selectedRows()
         if not rows: QMessageBox.information(self, "Nothing selected", "Select an input file in the table first."); return
-        path = self.session.reports[rows[0].row()].path
+        self.edit_path(self.session.reports[rows[0].row()].path)
+
+    def edit_path(self, path: str) -> None:
+        from scope.gui.editor import InputEditor
         try:
             with open(path) as f: form, extras = backend.sections_to_form(backend.parse_sections(f.read()))
         except OSError as exc: QMessageBox.warning(self, "Cannot read file", str(exc)); return
-        dialog = InputEditor(self, os.path.dirname(path), form, extras, os.path.basename(path))
+        dialog = InputEditor(self, os.path.dirname(path), form, extras, os.path.basename(path), reports=[r for r in self.session.reports if r.path != path])
         if dialog.exec() and dialog.saved_path: self.session.add_inputs([dialog.saved_path])
 
     def add(self) -> None:
@@ -299,20 +415,20 @@ class PipelineTab(QWidget):
         if paths: self.session.remove_inputs(paths)
 
     def refresh(self) -> None:
-        reports = self.session.reports
-        issues  = backend.pipeline_issues(reports)
+        reports, sources = self.session.reports, self.sources()
+        issues  = backend.pipeline_issues(reports, sources)
         by_file = {}
         for path, message in issues: by_file.setdefault(path, []).append(message)
-        self.table.setRowCount(len(reports))
+        self.table.setRowCount(len(reports)); last = 7
         for i, r in enumerate(reports):
             status = "ok" if r.ok and r.path not in by_file else ("warning: " + by_file[r.path][0] if r.ok else r.error)
-            cells = [os.path.basename(r.path), r.node if r.ok else "", r.software, r.comp_type, ("YES" if r.want_submit else "no") if r.ok else "", status]
+            cells = [os.path.basename(r.path), r.node if r.ok else "", r.istate if r.ok else "", r.fstate if r.ok else "", r.software, r.comp_type, ("YES" if r.want_submit else "no") if r.ok else "", status]
             for j, text in enumerate(cells): self.table.setItem(i, j, QTableWidgetItem(text))
             c = theme.colors()
-            if not r.ok: self.table.item(i, 5).setForeground(QBrush(QColor(c["err"]))); self.table.item(i, 5).setToolTip(r.error)
-            elif r.path in by_file: self.table.item(i, 5).setForeground(QBrush(QColor(c["warn"]))); self.table.item(i, 5).setToolTip("\n".join(by_file[r.path]))
+            if not r.ok: self.table.item(i, last).setForeground(QBrush(QColor(c["err"]))); self.table.item(i, last).setToolTip(r.error)
+            elif r.path in by_file: self.table.item(i, last).setForeground(QBrush(QColor(c["warn"]))); self.table.item(i, last).setToolTip("\n".join(by_file[r.path]))
         self.issues.setText("\n".join(m for _, m in issues))
-        self.graph.draw(reports)
+        self.graph.draw(reports, sources)
 
 ###############
 ### Run tab ###
@@ -323,15 +439,21 @@ class RunTab(QWidget):
         self.session = session
         self.record, self.offset, self.accept_legacy = None, 0, False       ## accept_legacy: show runs recorded before workspaces existed (the Default workspace)
         self.timer   = QTimer(self); self.timer.timeout.connect(self.tick)
-        self.system  = QComboBox()
+        self.system  = QComboBox(); self.system.currentTextChanged.connect(lambda _: self.update_warning())
         self.quiet, self.verbose, self.errors = QCheckBox("quiet (-q)"), QCheckBox("verbose (-v)"), QCheckBox("handle errors (-e)")
         self.warning = QLabel(); self.warning.setWordWrap(True); set_kind(self.warning, "err")
         self.run_btn  = QPushButton("Run"); self.run_btn.setProperty("primary", True); self.run_btn.clicked.connect(self.start)
         self.stop_btn = QPushButton("Stop"); self.stop_btn.clicked.connect(self.stop); self.stop_btn.setEnabled(False)
         self.log      = QPlainTextEdit(); self.log.setReadOnly(True); self.log.setLineWrapMode(QPlainTextEdit.NoWrap)
         self.status   = QLabel("Idle")
-        top = QHBoxLayout(); top.addWidget(QLabel("System")); top.addWidget(self.system, 1); [top.addWidget(w) for w in (self.quiet, self.verbose, self.errors, self.run_btn, self.stop_btn)]
-        lay = QVBoxLayout(self); lay.addLayout(top); lay.addWidget(self.warning); lay.addWidget(self.log, 1); lay.addWidget(self.status)
+        self.system.setMinimumContentsLength(12); self.system.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        top = QHBoxLayout(); top.addWidget(QLabel("System")); top.addWidget(self.system, 1); top.addWidget(self.run_btn); top.addWidget(self.stop_btn)
+        flags = QHBoxLayout(); [flags.addWidget(w) for w in (self.quiet, self.verbose, self.errors)]; flags.addStretch(1)
+        from scope.gui.review_view import ReviewTable
+        self.review = ReviewTable(); self.review_note = QLabel(); self.review_note.setWordWrap(True)
+        review_box = QWidget(); rb = QVBoxLayout(review_box); rb.setContentsMargins(0, 0, 0, 0); rb.addWidget(QLabel("Review: every input file as it will run here")); rb.addWidget(self.review, 1); rb.addWidget(self.review_note)
+        split = QSplitter(Qt.Vertical); split.addWidget(review_box); split.addWidget(self.log); split.setStretchFactor(0, 1); split.setStretchFactor(1, 2)
+        lay = QVBoxLayout(self); lay.addLayout(top); lay.addLayout(flags); lay.addWidget(self.warning); lay.addWidget(split, 1); lay.addWidget(self.status)
         session.systemsChanged.connect(self.refresh); session.inputsChanged.connect(self.refresh); session.envChanged.connect(self.refresh)
 
     def refresh(self) -> None:
@@ -339,7 +461,20 @@ class RunTab(QWidget):
         self.system.clear()
         self.system.addItems([r.name for r in self.session.systems() if r.file])
         if current: self.system.setCurrentText(current)
-        self.warning.setText("\n".join(w for w in [backend.submission_warning(self.session.info, self.session.reports), *backend.queue_problems(self.session.info, self.session.reports)] if w))
+        self.update_warning()
+
+    def update_warning(self) -> None:
+        from scope.gui import systems
+        i = self.session.info; row = next((r for r in self.session.systems() if r.name == self.system.currentText() and r.file), None)
+        self.review.show_rows(backend.review_rows(self.session.reports, i.scheduler if i else "", i.queues if i else None, systems.source_names(row.file) if row else None))
+        self.review_note.setText(self.review.summary()); set_kind(self.review_note, {"ok": "ok", "warn": "warn", "err": "err"}[self.review.level] if self.review.rows else "")
+        self.warning.setText("\n".join(w for w in [backend.submission_warning(self.session.info, self.session.reports), *backend.queue_problems(self.session.info, self.session.reports), *self.source_checks()] if w))
+
+    def source_checks(self) -> list:
+        """Charge and spin of the chosen system's sources that need a look before running (import defaults, impossible spin, charged QE states)."""
+        from scope.gui import systems
+        row = next((r for r in self.session.systems() if r.name == self.system.currentText() and r.file), None)
+        return systems.run_checks(row.file, sorted({r.software for r in self.session.reports if r.ok})) if row else []
 
     def start(self) -> None:
         s = self.session
@@ -349,6 +484,8 @@ class RunTab(QWidget):
         if self.running(): QMessageBox.information(self, "A run is in progress", "Wait for the current run to end, or stop it first: two runs on one system can overwrite each other's results."); return
         other = backend.active_local_run(s.info.filepath, self.system.currentText())
         if other: QMessageBox.information(self, "This system is already running", f"'{other['system']}' is already being run from this environment (started {time.strftime('%H:%M', time.localtime(other['started']))}, perhaps from another workspace or window). Two runs on one system overwrite each other's results: wait for it to end."); return
+        checks = self.source_checks() if s.info.scheduler != "local" else []          ## a local environment never writes inputs: the label warns, no question
+        if checks and QMessageBox.question(self, "Check charge and spin", "\n\n".join(checks[:6]) + ("\n…" if len(checks) > 6 else "") + "\n\nRun anyway?") != QMessageBox.Yes: return
         warning = backend.submission_warning(s.info, valid)
         if warning and QMessageBox.question(self, "Jobs will be submitted", warning + "\n\nContinue?") != QMessageBox.Yes: return
         record = backend.start_detached_local(s.info.filepath, self.system.currentText(), [r.path for r in valid], self.quiet.isChecked(), self.verbose.isChecked(), self.errors.isChecked())
@@ -404,7 +541,7 @@ class RunTab(QWidget):
 ### Main window ###
 ###################
 STEPS = [("environment", "Environment", "Say where your files live", "1 ·"), ("systems", "Systems", "Bring in the molecules to compute", "2 ·"), ("pipeline", "Pipeline", "Describe what to compute, and in what order", "3 ·"),
-         ("run", "Run", "Let SCOPE act on the pipeline", "4 ·"), ("cluster", "Cluster", "Run on a remote cluster instead of this computer", "5 ·"),
+         ("run", "Run here", "Run SCOPE on this computer (the Runs page lists every run, here and on clusters)", "4 ·"), ("cluster", "Cluster", "Run on a remote cluster instead of this computer", "5 ·"),
          ("results", "Results", "See what SCOPE computed and registered (read-only)", "6 ·")]
 
 class Page(QWidget):
@@ -414,7 +551,7 @@ class Page(QWidget):
         self.key = key
         head  = QLabel(f"Step {number} of {len(STEPS)}"); head.setObjectName("pagesub")
         name  = QLabel(title); name.setObjectName("pagetitle")
-        sub   = QLabel(subtitle); sub.setObjectName("pagesub")
+        sub   = QLabel(subtitle); sub.setObjectName("pagesub"); sub.setWordWrap(True)                 ## wraps instead of setting the window's width
         help_ = QPushButton("Manual: what does this step do?"); help_.clicked.connect(lambda: window.open_manual(STEPS[number - 1][3]))
         top   = QHBoxLayout(); col = QVBoxLayout(); col.setSpacing(2); [col.addWidget(x) for x in (head, name, sub)]; top.addLayout(col, 1); top.addWidget(help_, 0, Qt.AlignTop)
         foot  = QHBoxLayout(); foot.addStretch(1)
@@ -422,6 +559,8 @@ class Page(QWidget):
             back = QPushButton(f"←  {STEPS[number - 2][1]}"); back.clicked.connect(lambda: window.go(number - 2)); foot.addWidget(back)
         if number < len(STEPS):
             nxt = QPushButton(f"Next: {STEPS[number][1]}  →"); nxt.setProperty("primary", True); nxt.clicked.connect(lambda: window.go(number)); foot.addWidget(nxt)
+        if not isinstance(body, QScrollArea):
+            area = QScrollArea(); area.setWidgetResizable(True); area.setFrameShape(QFrame.NoFrame); area.setWidget(body); body = area
         lay = QVBoxLayout(self); lay.setContentsMargins(26, 20, 26, 16); lay.setSpacing(12); lay.addLayout(top); lay.addWidget(body, 1); lay.addLayout(foot)
 
 def status_row(glyph: str, colour: str, main: str, sub: str="") -> str:
@@ -440,7 +579,7 @@ class LocalScopeDialog(QDialog):
     """Details of the SCOPE installation on this computer, with a copyable text and a button to check again."""
     def __init__(self, parent: QWidget, window: "MainWindow"):
         super().__init__(parent); self.window_ = window
-        self.setWindowTitle("SCOPE on this computer"); self.resize(760, 470)
+        self.setWindowTitle("SCOPE on this computer"); theme.fit(self, 760, 470)
         self.text = QPlainTextEdit(); self.text.setReadOnly(True); mono = self.text.font(); mono.setFamily("Menlo"); self.text.setFont(mono); self.text.setLineWrapMode(QPlainTextEdit.WidgetWidth)
         again, copy, close = QPushButton("Check again"), QPushButton("Copy"), QPushButton("Close")
         again.clicked.connect(window.check_local); copy.clicked.connect(lambda: QGuiApplication.clipboard().setText(self.text.toPlainText())); close.clicked.connect(self.accept)
@@ -463,7 +602,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.local, self.local_checked_at, self.local_task = backend.LocalScope(), 0.0, None
         self.update_status, self.update_task, self.update_repo, self.updated, self.update_message = None, None, None, False, ""     ## update_repo None: the checkout SCOPE is imported from
-        self.setWindowTitle("SCOPE"); self.resize(1240, 800)
+        self.setWindowTitle("SCOPE"); theme.fit(self, 1240, 800)
         self.session = Session()
         theme.apply(QApplication.instance(), backend.load_gui_config().get("theme", "auto"))
         self.env_tab, self.sys_tab, self.pipe_tab, self.run_tab = EnvironmentTab(self.session), SystemsTab(self.session), PipelineTab(self.session), RunTab(self.session)
@@ -514,7 +653,9 @@ class MainWindow(QMainWindow):
         self.theme_btn = QPushButton(); self.theme_btn.setObjectName("themebtn"); self.theme_btn.setCursor(Qt.PointingHandCursor); self.theme_btn.clicked.connect(self.cycle_theme)
         tw = QHBoxLayout(); tw.setContentsMargins(14, 8, 14, 0); tw.addWidget(self.theme_btn); tw.addStretch(1); sl.addLayout(tw)
 
-        root = QWidget(); rl = QHBoxLayout(root); rl.setContentsMargins(0, 0, 0, 0); rl.setSpacing(0); rl.addWidget(side); rl.addWidget(self.tabs, 1); self.setCentralWidget(root)
+        side_area = QScrollArea(); side_area.setWidgetResizable(True); side_area.setFrameShape(QFrame.NoFrame); side_area.setFixedWidth(240); side_area.setWidget(side)        ## scrolls on a short screen instead of making the window taller
+        side_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff); side_area.setStyleSheet("QScrollArea { background: transparent; border: none; }")
+        root = QWidget(); rl = QHBoxLayout(root); rl.setContentsMargins(0, 0, 0, 0); rl.setSpacing(0); rl.addWidget(side_area); rl.addWidget(self.tabs, 1); self.setCentralWidget(root)
         self.statusBar().showMessage("Local mode: no scheduler is used unless the environment says so.")
         for signal in (self.session.envChanged, self.session.systemsChanged, self.session.inputsChanged, self.session.progressChanged): signal.connect(self.update_steps)
         theme.on_change(self.on_theme); theme.on_change(self.render_local); theme.on_change(self.render_updates); self.on_theme(); self.render_local()

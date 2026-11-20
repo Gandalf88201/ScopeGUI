@@ -23,9 +23,15 @@ UNITS   = {"Eh": 1.0, "kcal/mol": 627.509474, "kJ/mol": 2625.4996, "eV": 27.2113
 ADDONS  = {"scope_sco": "scope-sco", "scope_azo": "scope-azo"}                                ## module in a pickle -> package to install
 
 ## Status written by the output parsers (g16_output / qe_output get_last_block_status), grouped for colours. Anything else is 'unknown'.
+## 'worked' only means that SCOPE could extract results; whether the program finished normally (isfinished) and converged (isgood, and for
+## rep_opt jobs isconverged) are separate facts, so comp_group lowers 'ok' to 'partial' or 'unconverged' when they say so.
 STATUS_GROUP = {"worked": "ok", "no_coord": "ok", "time_stopped": "warn", "no_scf_convergence": "err", "aborted": "err"}
-STATUS_TEXT  = {"worked": "worked", "no_coord": "finished (no new geometry: normal for single points)", "time_stopped": "stopped by the time limit",
+STATUS_TEXT  = {"worked": "finished and converged", "no_coord": "finished (no new geometry: normal for single points)", "time_stopped": "stopped by the time limit",
                 "no_scf_convergence": "SCF did not converge", "aborted": "aborted"}
+GROUP_TEXT   = {"partial": "results extracted, but the program did not finish normally", "unconverged": "finished, but not converged (SCF, optimisation or repeated-optimisation criteria)"}
+## Settings that change an energy, per program: two energies are compared only when these agree (and the formula and charge do).
+ENERGY_KEYS  = {"g16": ["functional", "basis", "is_grimme", "grimme_type", "unrestricted", "ultrafine_grid"],
+                "qe":  ["functional", "pp_library", "is_hubbard", "uterm", "is_grimme", "grimme_type"]}
 
 class ResultsError(Exception):
     """A system that cannot be shown. `kind` is 'no_environment', 'no_system', 'addon' or 'unreadable'; `hint` says what to do."""
@@ -114,6 +120,8 @@ class CompRow:
     out_rel:    str
     out_exists: bool
     inp_exists: bool
+    finished:   "bool | None" = None                                       ## the program ended normally (SCOPE's isfinished); None if not recorded
+    converged:  "bool | None" = None                                       ## SCF / optimisation converged (isgood, and isconverged for rep_opt)
 
     @property
     def label(self) -> str:
@@ -123,6 +131,7 @@ class CompRow:
     def status_text(self) -> str:
         if self.group == "waiting":      return "no output here (still running, not downloaded, or not started)"
         if self.group == "unregistered": return "output here, not registered yet (run SCOPE to read it)"
+        if self.group in GROUP_TEXT:     return GROUP_TEXT[self.group]
         return STATUS_TEXT.get(self.status, self.status or "unknown")
 
 @dataclass
@@ -155,6 +164,11 @@ class StateRow:
     group:       str
     retried:     bool = False
     method:      str  = ""
+    charge:      "int | None" = None                                      ## total charge of the source (energies of different charges are not comparable)
+
+    @property
+    def key(self) -> tuple:
+        return comparable_key(self)
 
 @dataclass
 class Summary:
@@ -310,17 +324,61 @@ def run_label(job: str, step: int, run: int) -> str:
     """'opt r1', or 'vc s3 r2' for step 3 of a repeated job, as in SCOPE's file names (…_vc_s3_r2)."""
     return f"{job}{f' s{step}' if step and step > 1 else ''} r{run}"
 
+def energy_settings(c: object) -> tuple:
+    """(software, ((key, value), …)) of the settings that change an energy (ENERGY_KEYS), as SCOPE's input data holds them. A dispersion type
+    counts only when dispersion is on, a U value only with Hubbard on. Unknown software: every non-private qc_data attribute but the states."""
+    qc = getattr(c, "qc_data", None); software = str(getattr(qc, "software", "") or getattr(c, "software", ""))
+    keys = ENERGY_KEYS.get(software) or sorted(k for k in vars(qc or object()) if not k.startswith("_") and k not in ("istate", "fstate", "comp_type", "software")) if qc is not None else []
+    out = []
+    for k in keys:
+        if k == "grimme_type" and not getattr(qc, "is_grimme", False): continue
+        if k == "uterm" and not getattr(qc, "is_hubbard", False): continue
+        v = getattr(qc, k, None)
+        if v is None or v is False: continue
+        out.append((k, str(v).strip().lower()))
+    return software, tuple(out)
+
 def method_of(c: object) -> str:
-    """What a calculation asked for, from its input data: 'g16 b3lyp** def2svp', 'qe pbe vanderbilt'."""
-    qc = getattr(c, "qc_data", None)
-    parts = [getattr(qc, "software", ""), getattr(qc, "functional", ""), getattr(qc, "basis", "") or getattr(qc, "pseudo", "")]
+    """What a calculation asked for, from its input data, with every setting that changes the energy: 'g16 b3lyp def2svp',
+    'qe pbe vanderbilt', 'qe pbe sssp +U=2.35 +d3bj', 'g16 pbe0 def2tzvp +d3bj unrestricted'."""
+    software, items = energy_settings(c); d = dict(items)
+    parts = [software, d.get("functional", ""), d.get("basis", "") or d.get("pp_library", "")]
+    if "uterm" in d:          parts.append(f"+U={d['uterm']}")
+    if "grimme_type" in d:    parts.append(f"+{d['grimme_type']}")
+    elif "is_grimme" in d:    parts.append("+dispersion")
+    if "unrestricted" in d:   parts.append("unrestricted")
+    if "ultrafine_grid" in d: parts.append("ultrafine")
+    parts += [f"{k}={v}" for k, v in items if k not in ("functional", "basis", "pp_library", "uterm", "grimme_type", "is_grimme", "is_hubbard", "unrestricted", "ultrafine_grid")]
     return " ".join(str(x) for x in parts if x)
 
-def comp_group(c: object) -> str:
-    """Status group of one calculation: ok / warn / err / unknown once registered; unregistered (output here, not read yet) or waiting otherwise."""
-    if getattr(c, "isregistered", False): return STATUS_GROUP.get(str(getattr(c, "status", "") or ""), "unknown")
-    out = getattr(c, "out_path", "") or ""
-    return "unregistered" if out and os.path.isfile(out) else "waiting"
+def comparable_key(row: object) -> tuple:
+    """What two rows (StateRow or CompareRow) must share for their energies to be compared: formula, method (every energy setting) and total
+    charge. The spin is NOT part of it: comparing the spin states of one compound (high- vs low-spin) is the point of many studies."""
+    return (getattr(row, "formula", ""), getattr(row, "method", ""), getattr(row, "charge", None))
+
+def comp_group(c: object, job: object=None) -> str:
+    """Status group of one calculation.
+
+    Registered: 'ok' only when SCOPE extracted results (status worked/no_coord) AND the program finished normally (isfinished) AND it
+    converged (isgood; for the newest step of a rep_opt job also the job's isconverged). Otherwise 'partial' (results extracted, the run did
+    not finish), 'unconverged' (finished, not converged), or warn / err / unknown from the status. An attribute an older system file lacks
+    does not lower the group. Not registered: 'unregistered' (output here, not read yet) or 'waiting'."""
+    if not getattr(c, "isregistered", False):
+        out = getattr(c, "out_path", "") or ""
+        return "unregistered" if out and os.path.isfile(out) else "waiting"
+    group = STATUS_GROUP.get(str(getattr(c, "status", "") or ""), "unknown")
+    if group != "ok": return group
+    if getattr(c, "isfinished", None) is False: return "partial"
+    if getattr(c, "isgood", None) is False: return "unconverged"
+    if job is not None and getattr(job, "job_setup", "") == "rep_opt" and getattr(job, "isconverged", None) is False and c is newest(job): return "unconverged"
+    return "ok"
+
+def newest(job: object) -> object:
+    comps = list(getattr(job, "computations", []) or [])
+    return max(comps, key=lambda x: (int(getattr(x, "step", 1) or 1), int(getattr(x, "run_number", 1) or 1))) if comps else None
+
+def _flag(value) -> "bool | None":
+    return None if value is None else bool(value)
 
 def comp_rows(obj: object) -> list:
     rows = []
@@ -330,13 +388,22 @@ def comp_rows(obj: object) -> list:
                 for c in job.computations:
                     out = getattr(c, "out_path", "") or ""; out_exists = bool(out) and os.path.isfile(out)
                     registered = bool(getattr(c, "isregistered", False)); status = str(getattr(c, "status", "") or "") if registered else ""
-                    qc = getattr(c, "qc_data", None)
+                    qc = getattr(c, "qc_data", None); group = comp_group(c, job)
                     rel = os.path.relpath(out, obj.computations_path) if out else ""
+                    converged = None if not registered else (False if group == "unconverged" else _flag(getattr(c, "isgood", None)))
                     rows.append(CompRow(br.name, wf.name, job.name, int(getattr(c, "step", 1) or 1), int(getattr(c, "run_number", 1) or 1), str(getattr(c, "software", "")), str(getattr(c, "type", "")),
-                                        str(getattr(qc, "istate", "")), str(getattr(qc, "fstate", "")), status, comp_group(c),
+                                        str(getattr(qc, "istate", "")), str(getattr(qc, "fstate", "")), status, group,
                                         _num(getattr(c, "elapsed_time", None)) if registered else None, _num(getattr(c, "cpu_time", None)) if registered else None,
-                                        out, rel, out_exists, bool(getattr(c, "inp_path", "")) and os.path.isfile(c.inp_path)))
+                                        out, rel, out_exists, bool(getattr(c, "inp_path", "")) and os.path.isfile(c.inp_path),
+                                        _flag(getattr(c, "isfinished", None)) if registered else None, converged))
     return rows
+
+def source_charge(src: object) -> "int | None":
+    """Total charge of a source (the sum of its atoms' charges, as SCOPE computes it), or None when it cannot be known."""
+    try:
+        q = getattr(src, "charge", None)
+        return None if q is None else int(q)
+    except Exception: return None
 
 def state_rows(obj: object) -> list:
     rows = []
@@ -346,11 +413,11 @@ def state_rows(obj: object) -> list:
             energy, note = to_hartree(getattr(st, "results", {}).get("energy"))
             freqs = [f for f in (getattr(st, "freqs_cm", None) or [])]
             labels = [run_label(c._job.name, getattr(c, "step", 1), getattr(c, "run_number", 1)) for c in comps]
-            groups = [comp_group(c) for c in comps]
+            groups = [comp_group(c, getattr(c, "_job", None)) for c in comps]
             minimum = getattr(st, "isminimum", None) if freqs else None
             rows.append(StateRow(src.name, str(getattr(src, "object_subtype", "")), str(getattr(src, "formula", "")), st.name, energy, note,
                                  minimum, len(freqs), sum(1 for f in freqs if f < 0), labels, groups[-1] if groups else "none",
-                                 any(g != "ok" for g in groups[:-1]), method_of(comps[-1]) if comps else ""))
+                                 any(g != "ok" for g in groups[:-1]), method_of(comps[-1]) if comps else "", source_charge(src)))
     return rows
 
 def summarize(obj: object) -> Summary:
@@ -366,11 +433,11 @@ def _num(value) -> "float | None":
     except (TypeError, ValueError): return None
 
 def relative_energies(rows: list) -> dict:
-    """ΔE (Hartree) of each row against the lowest energy among the rows that can be compared with it: same formula AND same method
-    (energies of different methods or compositions are not comparable). {(source, state): ΔE}; rows without energy, or alone in their group, are left out."""
+    """ΔE (Hartree) of each row against the lowest energy among the rows that can be compared with it: same formula, same method (every
+    setting that changes an energy, see ENERGY_KEYS) and same charge. {(source, state): ΔE}; rows without energy, or alone in their group, are left out."""
     groups = {}
     for r in rows:
-        if r.energy is not None: groups.setdefault((r.formula, r.method), []).append(r)
+        if r.energy is not None: groups.setdefault(comparable_key(r), []).append(r)
     return {(r.source, r.state): r.energy - min(x.energy for x in g) for g in groups.values() if len(g) > 1 for r in g}
 
 #################
@@ -402,12 +469,12 @@ def plot_metadata(provs: "Provenance | list | None", settings: "dict | None"=Non
 def overview_csv(rows: list, units: str="kcal/mol", prov: "Provenance | None"=None) -> str:
     """The overview table as CSV, with the provenance as leading comment lines."""
     out = io.StringIO(); factor = UNITS[units]; rel = relative_energies(rows)
-    if prov: out.write(header(prov, {"dE": "against the lowest energy of the same formula and method"}))
+    if prov: out.write(header(prov, {"dE": "against the lowest energy of the same formula, method (every energy setting) and charge"}))
     w = csv.writer(out)
-    w.writerow(["source", "formula", "state", "method", "energy_Eh", f"dE_{units}", "minimum", "n_freqs", "n_imaginary", "runs", "status", "retried"])
+    w.writerow(["source", "formula", "charge", "state", "method", "energy_Eh", f"dE_{units}", "minimum", "n_freqs", "n_imaginary", "runs", "status", "retried"])
     for r in rows:
         de = rel.get((r.source, r.state))
-        w.writerow([r.source, r.formula, r.state, r.method, "" if r.energy is None else f"{r.energy:.10f}", "" if de is None else f"{de * factor:.4f}",
+        w.writerow([r.source, r.formula, "" if r.charge is None else r.charge, r.state, r.method, "" if r.energy is None else f"{r.energy:.10f}", "" if de is None else f"{de * factor:.4f}",
                     "" if r.minimum is None else ("yes" if r.minimum else "no"), r.n_freqs, r.n_imag, " ".join(r.runs), r.group, "yes" if r.retried else ""])
     return out.getvalue()
 
@@ -416,9 +483,10 @@ def comps_csv(comps: list, prov: "Provenance | None"=None) -> str:
     out = io.StringIO()
     if prov: out.write(header(prov))
     w = csv.writer(out)
-    w.writerow(["branch", "workflow", "calculation", "software", "type", "reads", "writes", "status", "group", "wall_s", "cpu_s", "output", "output_here"])
+    yn = lambda v: "" if v is None else ("yes" if v else "no")
+    w.writerow(["branch", "workflow", "calculation", "software", "type", "reads", "writes", "status", "finished", "converged", "group", "wall_s", "cpu_s", "output", "output_here"])
     for c in comps:
-        w.writerow([c.branch, c.workflow, c.label, c.software, c.comp_type, c.istate, c.fstate, c.status, c.group, "" if c.elapsed is None else f"{c.elapsed:g}",
+        w.writerow([c.branch, c.workflow, c.label, c.software, c.comp_type, c.istate, c.fstate, c.status, yn(c.finished), yn(c.converged), c.group, "" if c.elapsed is None else f"{c.elapsed:g}",
                     "" if c.cpu is None else f"{c.cpu:g}", c.out_rel, "yes" if c.out_exists else "no"])
     return out.getvalue()
 
@@ -693,7 +761,7 @@ def comparable_pairs(summary: Summary) -> list:
     """Pairs ((source, state), (source, state)) of states with frequencies and the same formula and method, in two different sources:
     the pairs whose ΔG(T) means something (for instance the high- and low-spin states of a spin-crossover compound)."""
     rows = [r for r in summary.states if r.n_freqs and r.energy is not None]
-    return [((a.source, a.state), (b.source, b.state)) for i, a in enumerate(rows) for b in rows[i + 1:] if a.source != b.source and (a.formula, a.method) == (b.formula, b.method)]
+    return [((a.source, a.state), (b.source, b.state)) for i, a in enumerate(rows) for b in rows[i + 1:] if a.source != b.source and comparable_key(a) == comparable_key(b)]
 
 def thermo_csv(th: Thermo, units: str="kcal/mol", prov: "Provenance | None"=None) -> str:
     out = io.StringIO(); f = UNITS[units]; w = csv.writer(out)
@@ -724,6 +792,11 @@ class CompareRow:
     method:  str
     value:   "float | None"
     note:    str = ""
+    charge:  "int | None" = None
+
+    @property
+    def key(self) -> tuple:
+        return comparable_key(self)
 
 def compare_rows(loaded: list, quantity: str="energy", temperature: float=298.15, model: str="HO", imaginary: str="ignore") -> list:
     """Rows of several loaded systems (results.Loaded). quantity 'energy' uses the registered energies; 'gibbs' computes G(T) with SCOPE's
@@ -732,24 +805,25 @@ def compare_rows(loaded: list, quantity: str="energy", temperature: float=298.15
     for L in loaded:
         for r in L.summary.states:
             if r.energy is None: continue
-            if quantity == "energy": rows.append(CompareRow(L.provenance.system, r.source, r.state, r.formula, r.method, r.energy)); continue
+            row = lambda value, note="": CompareRow(L.provenance.system, r.source, r.state, r.formula, r.method, value, note, getattr(r, "charge", None))
+            if quantity == "energy": rows.append(row(r.energy)); continue
             why = thermo_ready(L.system, r.source, r.state)
-            if why: rows.append(CompareRow(L.provenance.system, r.source, r.state, r.formula, r.method, None, why)); continue
-            try: th = thermo(L.system, r.source, r.state, [temperature], model, imaginary); rows.append(CompareRow(L.provenance.system, r.source, r.state, r.formula, r.method, th.G[0]))
-            except Exception as exc: rows.append(CompareRow(L.provenance.system, r.source, r.state, r.formula, r.method, None, f"{type(exc).__name__}: {exc}"))
+            if why: rows.append(row(None, why)); continue
+            try: th = thermo(L.system, r.source, r.state, [temperature], model, imaginary); rows.append(row(th.G[0]))
+            except Exception as exc: rows.append(row(None, f"{type(exc).__name__}: {exc}"))
     return rows
 
 def compare_relative(rows: list) -> dict:
-    """Δ of each row against the lowest value among rows of the same formula AND method, across systems: {(system, source, state): Δ (Eh)}.
-    Rows alone in their group, or without a value, are left out (their values cannot be compared with anything shown)."""
+    """Δ of each row against the lowest value among rows of the same formula, method (every energy setting) and charge, across systems:
+    {(system, source, state): Δ (Eh)}. Rows alone in their group, or without a value, are left out (their values cannot be compared with anything shown)."""
     groups = {}
     for r in rows:
-        if r.value is not None: groups.setdefault((r.formula, r.method), []).append(r)
+        if r.value is not None: groups.setdefault(comparable_key(r), []).append(r)
     return {(r.system, r.source, r.state): r.value - min(x.value for x in g) for g in groups.values() if len(g) > 1 for r in g}
 
 def compare_csv(rows: list, units: str="kcal/mol", quantity: str="energy", temperature: float=298.15, provs: "list | None"=None, settings: "dict | None"=None) -> str:
     out = io.StringIO(); f = UNITS[units]; rel = compare_relative(rows); w = csv.writer(out)
-    what = {"quantity": f"{'electronic energy' if quantity == 'energy' else f'G at {temperature:g} K per formula unit'}; Δ against the lowest of the same formula and method"}
+    what = {"quantity": f"{'electronic energy' if quantity == 'energy' else f'G at {temperature:g} K per formula unit'}; Δ against the lowest of the same formula, method and charge"}
     out.write(header(provs, what | (settings or {})))
     w.writerow(["system", "source", "state", "formula", "method", "value_Eh", f"delta_{units}", "note"])
     for r in rows:

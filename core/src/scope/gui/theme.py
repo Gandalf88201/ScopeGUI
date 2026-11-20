@@ -105,6 +105,7 @@ def stylesheet(c: dict) -> str:
     QListWidget#manualtoc::item:disabled {{ color: {c['sub']}; padding-top: 14px; }}
     QTextBrowser#manualview {{ background: {c['base']}; border: 1px solid {c['border']}; border-radius: 10px; padding: 0; }}
     QFrame#card {{ background: {c['base']}; border: 1px solid {c['border']}; border-radius: 10px; }}
+    QFrame#lighttile {{ background: {c['alt']}; border: 1px solid {c['border']}; border-radius: 8px; }}
     QLabel#restitle {{ font-size: 18px; font-weight: 700; color: {c['text']}; }}
     QLabel#cardtitle {{ color: {c['sub']}; font-size: 11px; font-weight: 700; letter-spacing: 1px; text-transform: uppercase; }}
     QListWidget#navlist {{ background: transparent; border: none; outline: 0; }}
@@ -112,6 +113,13 @@ def stylesheet(c: dict) -> str:
     QListWidget#navlist::item:hover {{ background: {c['alt']}; }}
     QListWidget#navlist::item:selected {{ background: {c['highlight']}; color: {c['text']}; font-weight: 600; }}
     """
+
+def fit(widget, width: int, height: int) -> None:
+    """Open a window at its preferred size, but never larger than the screen's free area (a 1366x768 laptop minus the taskbar), so the
+    title bar and the buttons at the bottom stay reachable."""
+    screen = widget.screen() or QGuiApplication.primaryScreen()
+    if screen is None: widget.resize(width, height); return
+    free = screen.availableGeometry(); widget.resize(min(width, int(free.width() * 0.95)), min(height, int(free.height() * 0.92)))
 
 def set_kind(widget, kind: str) -> None:
     """Marks a label as 'ok', 'warn' or 'err' so the stylesheet colours it, and recolours it when the theme changes."""
