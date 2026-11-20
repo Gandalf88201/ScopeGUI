@@ -101,6 +101,13 @@ def compare(listing: dict, info: "backend.EnvInfo", system: str, max_mb: float=2
         out.append(f)
     return out
 
+def unread(listing: dict) -> list:
+    """Files of the cluster listing written after the cluster's system file was last saved: SCOPE has not read them yet (it reads outputs
+    when it runs again), so the results they hold are not in that system file. [] when the listing has no system file."""
+    npy = listing.get("system")
+    if not npy: return []
+    return [rel for rel, size, mtime in listing.get("files", []) if int(mtime) > int(npy[1]) and safe_rel(rel)]
+
 def human(size: int) -> str:
     for unit in ("B", "kB", "MB", "GB", "TB"):
         if size < 1000 or unit == "TB": return f"{size:.0f} {unit}" if unit == "B" else f"{size:.1f} {unit}"

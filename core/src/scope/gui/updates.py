@@ -3,10 +3,11 @@
 SCOPE is installed by the launcher as a development install of the folder it was cloned into, so newer code is newer commits on
 GitHub. Two operations, kept apart:
 
-- check: `git fetch` of the branches compared against (the one the local branch follows, and the main branch of the main remote).
+- check: `git fetch` of the branches compared against: the main branch of the GitHub repository this copy follows (updates come
+  from there, whatever branch is checked out), and the main branch of the main remote when it is another one.
   A fetch only updates git's record of what GitHub holds; the files of SCOPE are not changed. It never asks for a password: a
   remote that needs one makes the check fail with a message instead.
-- update: `git merge --ff-only` of the followed branch, only when nothing here would be lost or mixed: no uncommitted changes to
+- update: `git merge --ff-only` of that main branch into the current branch, only when nothing here would be lost or mixed: no uncommitted changes to
   tracked files and no local commits that the branch on GitHub lacks. Anything else is left to the user, with an explanation.
 
 The check runs only once the user has allowed it (or when they press Check now); its setting and the time of the last check are
@@ -46,18 +47,26 @@ def local_commit(path: str=None) -> tuple:
     parts = out.split() if code == 0 else []
     return (parts[0], parts[1]) if len(parts) == 2 else ("", "")
 
-def targets(repo: str) -> list:
-    """The remote branches to compare with: the one the current branch follows (if any), then the main branch of the main remote
-    ('upstream' when it exists, as in a fork, otherwise 'origin')."""
-    out = []
+def remote_main(repo: str, remote: str) -> str:
+    """The main branch of `remote` as git knows it: what its HEAD points to (set by a clone), otherwise '<remote>/main'."""
+    code, head, _ = git(repo, "symbolic-ref", "--short", f"refs/remotes/{remote}/HEAD", timeout=10)
+    return head if code == 0 and head else f"{remote}/main"
+
+def source(repo: str) -> str:
+    """The branch updates come from: the main branch of the GitHub repository this copy follows (the remote of the current branch's
+    upstream, otherwise 'origin'), whatever branch is checked out here. '' when there is no such remote."""
+    _, remotes, _ = git(repo, "remote", timeout=10); remotes = remotes.split()
     code, tracked, _ = git(repo, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}", timeout=10)
-    if code == 0 and tracked: out.append(tracked)
+    remote = next((r for r in remotes if code == 0 and tracked.startswith(r + "/")), "origin" if "origin" in remotes else "")
+    return remote_main(repo, remote) if remote else ""
+
+def targets(repo: str) -> list:
+    """The remote branches to compare with: first the one updates come from (see source), then, for information, the main branch of
+    the main remote ('upstream' when it exists, as in a fork, otherwise 'origin') when it is another branch."""
+    out = [source(repo)] if source(repo) else []
     _, remotes, _ = git(repo, "remote", timeout=10); remotes = remotes.split()
     main = "upstream" if "upstream" in remotes else ("origin" if "origin" in remotes else "")
-    if main:
-        code, head, _ = git(repo, "symbolic-ref", "--short", f"refs/remotes/{main}/HEAD", timeout=10)
-        ref = head if code == 0 and head else f"{main}/main"
-        if ref not in out: out.append(ref)
+    if main and remote_main(repo, main) not in out: out.append(remote_main(repo, main))
     return out
 
 @dataclass
@@ -66,7 +75,7 @@ class Target:
 
     Attributes:
         ref (str):      For instance 'origin/main'.
-        followed (bool): Whether the current branch follows it (only then can Update apply it).
+        followed (bool): Whether updates come from it (only then can Update apply it): the main branch of the repository this copy follows.
         exists (bool):  Whether git knows the branch (after a fetch).
         behind (int):   Commits it has that this copy lacks.
         ahead (int):    Commits this copy has that it lacks.
@@ -115,11 +124,9 @@ class UpdateStatus:
         t = self.followed()
         if not self.repo:   return "SCOPE was not installed from a git checkout, so this window cannot update it. Update it the way it was installed (for instance pip install -U)."
         if not self.branch: return "No branch is checked out (detached HEAD). Check out a branch, then update."
-        if t is None:
-            other = next((x for x in self.targets if x.exists and x.behind), None)
-            return (f"The branch '{self.branch}' does not follow a branch on GitHub, so there is nothing to update it from. " + (f"{other.ref} has {other.behind} new commit(s): bring them in with git (git merge {other.ref}, or git rebase {other.ref})." if other else "")).strip()
+        if t is None:       return "This copy has no remote repository on GitHub (no 'origin'), so there is nothing to update it from."
         if not t.behind:    return ""
-        if t.ahead:         return f"'{self.branch}' has {t.ahead} commit(s) of its own that {t.ref} lacks, so it cannot simply move forward. Bring the new commits in with git (git pull --rebase, or git merge {t.ref})."
+        if t.ahead:         return f"'{self.branch}' has {t.ahead} commit(s) of its own that {t.ref} lacks, so it cannot simply move forward. Bring the new commits in with git (git merge {t.ref}, or git rebase {t.ref})."
         if self.dirty:      return "There are uncommitted changes in the SCOPE folder. Commit or stash them first (git stash), then update."
         return ""
 
@@ -141,8 +148,7 @@ def status(repo: str=None, fetch: bool=True) -> UpdateStatus:
         _, st.branch, _ = git(st.repo, "symbolic-ref", "--short", "-q", "HEAD", timeout=10)
         _, head, _ = git(st.repo, "log", "-1", "--format=%h %cs", timeout=10); st.head, st.date = (head.split() + ["", ""])[:2]
         code, porcelain, _ = git(st.repo, "status", "--porcelain", "--untracked-files=no", timeout=30); st.dirty = code == 0 and bool(porcelain)
-        refs = targets(st.repo)
-        _, tracked, _ = git(st.repo, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}", timeout=10)
+        refs = targets(st.repo); src = source(st.repo)
         if fetch:
             errors = []
             for remote in dict.fromkeys(r.split("/")[0] for r in refs):
@@ -150,7 +156,7 @@ def status(repo: str=None, fetch: bool=True) -> UpdateStatus:
                 if code != 0: errors.append(f"{remote}: " + ((err.splitlines() or [f"exit code {code}"])[-1]))
             st.fetched, st.error = True, "; ".join(errors)
         for ref in refs:
-            t = Target(ref, followed=(ref == tracked))
+            t = Target(ref, followed=(ref == src))
             t.exists = git(st.repo, "rev-parse", "--verify", "-q", ref, timeout=10)[0] == 0
             if t.exists:
                 code, counts, _ = git(st.repo, "rev-list", "--left-right", "--count", f"HEAD...{ref}", timeout=30)
@@ -162,7 +168,7 @@ def status(repo: str=None, fetch: bool=True) -> UpdateStatus:
     return st
 
 def update(repo: str) -> tuple:
-    """Moves the current branch forward to the branch it follows (fast-forward only), after checking again that nothing would be
+    """Moves the current branch forward to the main branch updates come from (fast-forward only), after checking again that nothing would be
     lost. Returns (ok, message, needs_reinstall): needs_reinstall is True when the installation recipe (core/pyproject.toml) changed."""
     st = status(repo, fetch=False)
     if not st.can_update(): return False, st.blocker() or "There is nothing to update.", False

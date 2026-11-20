@@ -76,13 +76,14 @@ The version is read from the installation each time, so it follows an upgrade. T
 When SCOPE was installed from a git checkout (as `./scope-gui` does), a second line under the light says whether newer code is on GitHub. Click it for the details.
 
 - **The window asks first.** Until you allow it, the window never contacts GitHub; the line reads *Check for SCOPE updates?*. In the window that opens, tick **Check for updates once a day** to allow it. Closing the window without ticking means no; you can tick it later.
+- **Updates come from main.** The check compares your copy with the `main` branch of the GitHub repository your branch follows (the remote it pushes to; `origin` if it follows none), whatever branch you are on: a branch of your own, such as `gui-demo`, is compared with `main`, not with its own copy on GitHub. If the folder also has the original SCOPE repository as a remote, its `main` is listed too, for information only.
 - **The check changes nothing.** It runs `git fetch`, which only updates git's record of what GitHub holds. The line then shows *N updates on origin/main* (or *Up to date*), and the window lists the new commits with their date and title. **Check now** asks GitHub at once.
-- **Update only when it is safe.** **Update** moves your copy forward to the branch it follows (`git merge --ff-only`). It is offered only when nothing of yours would be touched: no uncommitted changes to SCOPE's files, and no commits of your own that GitHub lacks. Otherwise the window says why and which git command to use.
+- **Update only when it is safe.** **Update** moves the branch you are on forward to `main` (`git merge --ff-only`). It is offered only when nothing of yours would be touched: no uncommitted changes to SCOPE's files, and no commits of your own that GitHub lacks. Otherwise the window says why and which git command to use.
 - **Restart to use the new code.** After an update, **Restart the window** closes it and opens it again; runs keep going. If the update changed SCOPE's installation recipe, start the window with `./scope-gui`, which reinstalls by itself.
 
 | You see | Meaning |
 |---|---|
-| ↑ *3 updates on origin/main* | GitHub has newer code for the branch you follow |
+| ↑ *3 updates on origin/main* | `main` on GitHub has newer code than your copy |
 | ↻ *Up to date with origin/main* | Nothing new since the last check |
 | ! *Update check failed* | GitHub could not be reached (no network, or the repository needs a password); the details say why |
 | no line | SCOPE was installed as a package, not from a checkout: update it the way you installed it |
@@ -145,12 +146,19 @@ The **Runs** page (left bar) lists every run of every workspace in one table: th
 |---|---|
 | running | SCOPE is working now. |
 | waiting for jobs | SCOPE has ended, and jobs it submitted are still in the queue. The *Jobs* column says how many are running or pending (hover over it for the job ids). |
+| done, results not read yet | (cluster) No job of the system is left in the queue, but files in `Computations/<system>/` were written after SCOPE last saved the system: SCOPE has not read them, so the system file does not hold their results yet. Hover over the state for what to do. |
 | finished (exit 0) | SCOPE has ended and, on a cluster, none of the system's jobs is left in the queue. Run again to let SCOPE collect the results and go on with the next jobs. |
+
+**Why results can be "not read yet".** SCOPE reads (registers) the output of a calculation only when it runs, and saves the system file at the end of each run. On a cluster, `scope run` submits the jobs and ends; the jobs write their outputs later. Until SCOPE runs again, the cluster's system file does not contain those results, and neither does a copy of it you download. Two ways to have them read:
+- press **Run on the cluster** again (SCOPE reads the outputs and goes on with the next jobs, if any), then **Download results…** with the system file ticked; or
+- download the outputs and run the system on this computer (Run page): SCOPE reads them here.
+
+The window notices this by comparing dates: a file in `Computations/<system>/` newer than `Systems/<system>/<system>.npy` was written after SCOPE last saved. A file you touched by hand there counts too.
 | stopped / ended without finishing | SCOPE was stopped, or its process disappeared without writing how it ended. |
 
 A job belongs to a system when it runs in the system's folder of the project (`Computations/<system>/…`) or, if the scheduler does not tell the folder, when its name starts with the system name. Folders are also compared with their links resolved, so a project reached through a link (for instance `/home/…` pointing to `/gpfs/home/…`) still finds its jobs.
 
-The queues of Slurm (`squeue`) and SGE (`qstat`, recognised by `qconf` or `$SGE_ROOT`, as SCOPE does; each job's folder is read with `qstat -j`) are read. On another scheduler the Jobs column says *scheduler not recognised*, never *none in queue*. The Jobs column of a cluster row shows the queue as it was at the last check; runs on this computer use no queue (—). The Cluster page does the same when a run it follows ends: it looks at the queue once, and says that jobs are still waiting instead of offering to download the results.
+The queues of Slurm (`squeue`) and SGE (`qstat`, recognised by `qconf` or `$SGE_ROOT`, as SCOPE does; each job's folder is read with `qstat -j`) are read. On another scheduler the Jobs column says *scheduler not recognised*, never *none in queue*. The Jobs column of a cluster row shows the queue as it was at the last check; runs on this computer use no queue (—). The Cluster page does the same when a run it follows ends: it looks at the queue once, and says that jobs are still waiting, or that results are not read yet, instead of offering to download the results.
 
 ## How SCOPE thinks
 
@@ -389,6 +397,8 @@ A run started from here is detached: it has its own process and log on the clust
 | same | Same size and date | No |
 | newer here | Different here, and the local copy is newer | No: it is never replaced unless you tick it |
 
+If files on the cluster are newer than the cluster's system file, the line under the table says so: SCOPE has not read them yet, so the cluster's system file does not hold their results (see *Why results can be "not read yet"* under Runs).
+
 What makes it safe:
 
 - Files are written only inside this workspace's folders; names that would point elsewhere are refused, and links on the cluster are not followed.
@@ -425,6 +435,7 @@ system, prov = open_system("/path/to/scope_env_<name>.npy", "water")
 
 | Note | Meaning |
 |---|---|
+| *N outputs not read yet* | These outputs are on this computer, but SCOPE has not read them, so their energies and frequencies are not in the system file (rows marked ◌). Run the system on the Run page to read them; for outputs from the cluster you can instead run again on the cluster and download the system file |
 | *N output file(s) are not on this computer* | SCOPE registered (or expects) these outputs, but they are not here: still running, not downloaded, or not started. Energies and frequencies are in the system file and are shown anyway; reading an output needs the file. **Download missing outputs…** opens the download of the Cluster page with exactly those files ticked |
 | *Saved by SCOPE x, read by y* | The file comes from another SCOPE version. Values are read as stored |
 | *Newer RDKit* | The system file holds molecules written by a newer RDKit than this one. They are read, and RDKit's warnings (two lines per molecule in the terminal) are counted into this one note. Energies and frequencies are SCOPE's own numbers and are not affected |

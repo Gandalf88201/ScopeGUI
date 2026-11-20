@@ -19,7 +19,7 @@ class DownloadDialog(QDialog):
 
     def __init__(self, parent, profile: "remote.Profile", info, system: str, wanted: list=None):
         super().__init__(parent)
-        self.p, self.info, self.system, self.files, self.listing, self.tasks, self.busy = profile, info, system, [], {}, [], False
+        self.p, self.info, self.system, self.files, self.listing, self.tasks, self.busy, self.unread = profile, info, system, [], {}, [], False, []
         self.wanted = set(wanted or [])                                     ## files to tick (outputs the Results page misses), instead of the usual proposal
         self.setWindowTitle(f"Download results of '{system}'"); self.resize(980, 640)
         src  = f"{profile.host}:{profile.remote_root.rstrip('/')}/Computations/{system}/"; dst = os.path.join(info.computations_path, system) + "/"
@@ -69,6 +69,11 @@ class DownloadDialog(QDialog):
         self.with_system.setEnabled(bool(remote_npy))
         self.with_system.setChecked(bool(remote_npy) and (not os.path.isfile(local_npy) or remote_npy[1] > os.path.getmtime(local_npy) + 2))      ## proposed when the cluster's is newer
         if self.listing.get("truncated"): self.log.appendPlainText(f"Only the first {transfer.MAX_LIST} files are listed.")
+        self.unread = transfer.unread(self.listing)
+        if self.unread:
+            self.log.appendPlainText(f"{len(self.unread)} file(s) on the cluster were written after SCOPE last saved the system there, so the cluster's system file does not hold their results yet. "
+                                     "To have them read: press Run on the cluster again, then download the system file; or download these outputs and run the system on this computer.")
+            self.with_system.setToolTip(f"The cluster's system file was saved before {len(self.unread)} of these files were written: it does not include their results yet.")
         if self.wanted:
             for f in self.files: f.selected = f.rel in self.wanted
             found = sum(1 for f in self.files if f.rel in self.wanted)
@@ -111,7 +116,8 @@ class DownloadDialog(QDialog):
         heavy = [f for f in chosen if f.heavy or f.size > self.limit.value() * 1e6]
         problem = transfer.space_problem(self.info, total) if total else ""
         text = f"{len(chosen)} of {len(self.files)} file(s) ticked, {transfer.human(total)}." + (f"  {len(heavy)} of them heavy or over the limit." if heavy else "") + (f"\n{problem}" if problem else "")
-        self.summary.setText(text); theme.set_kind(self.summary, "err" if problem else ("warn" if heavy else "ok"))
+        if self.unread: text += f"\n{len(self.unread)} output(s) are not read by SCOPE yet: the cluster's system file does not include their results (see below)."
+        self.summary.setText(text); theme.set_kind(self.summary, "err" if problem else ("warn" if heavy or self.unread else "ok"))
         self.download_btn.setEnabled(not self.busy and (bool(chosen) or self.with_system.isChecked()) and not problem)
 
     ##### copy #####

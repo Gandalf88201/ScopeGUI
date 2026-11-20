@@ -658,7 +658,21 @@ def stop_script(p: Profile, system: str) -> str:
     """Asks the cluster run of a system to end: its whole process group, only if the pid is still that run."""
     return "\n".join([*_common(p, system), 'if [ -f "$PIDF" ] && alive "$(cat "$PIDF")" "$N"; then PID=$(cat "$PIDF"); kill -TERM -- -"$PID" 2>/dev/null || kill -TERM "$PID" 2>/dev/null; echo stopped; else echo "no run"; fi']) + "\n"
 
-LASTLINE, QUEUELINE, JOBLINE, REALROOT = "__SCOPE_GUI_LAST__", "__SCOPE_GUI_QUEUE__", "__SCOPE_GUI_JOB__", "__SCOPE_GUI_REALROOT__"
+LASTLINE, QUEUELINE, JOBLINE, REALROOT, UNREADLINE = "__SCOPE_GUI_LAST__", "__SCOPE_GUI_QUEUE__", "__SCOPE_GUI_JOB__", "__SCOPE_GUI_REALROOT__", "__SCOPE_GUI_UNREAD__"
+MAX_UNREAD = 1000                                                           ## counted at most, so a huge folder never slows the check
+
+## Outputs SCOPE has not read yet. SCOPE reads (registers) the output of a calculation only when it runs again, and saves the system file
+## at the end of each run; on a cluster the jobs write their outputs after `scope run` has ended. So a file in Computations/<system>/ that
+## is newer than Systems/<system>/<system>.npy was written after SCOPE last saved: SCOPE has not read it, and the results it holds are not
+## in the system file yet. One `UNREADLINE <count> <system>` line per system that has such files.
+## Kept cheap, as it runs at every check (30 s for all of it): only systems with a run log of this window are looked at (the only ones the
+## Runs page shows; the log name is the pid_name() form, made here with tr, so a name with non-ASCII letters is skipped), heavy working
+## folders (*.save, scope.*) are not walked, and the scan of each system stops after 10 s where `timeout` exists.
+_UNREAD_LINES = ['T=""; command -v timeout >/dev/null 2>&1 && T="timeout 10"',
+                 'for d in "$ROOT"/Systems/*/; do s=$(basename "$d"); y="$d$s.npy"; { [ -f "$y" ] && [ -d "$ROOT/Computations/$s" ]; } || continue',
+                 "  N=$(printf '%s' \"$s\" | LC_ALL=C tr -c 'A-Za-z0-9._-' '_'); ls \"$ROOT\"/logs/run_\"$N\"_*.log >/dev/null 2>&1 || continue",
+                 "  n=$(( $($T find \"$ROOT/Computations/$s\" \\( -name '*.save' -o -name 'scope.*' \\) -prune -o -type f -newer \"$y\" -print 2>/dev/null | head -n " + str(MAX_UNREAD) + " | wc -l) ))",
+                 f'  if [ "$n" -gt 0 ]; then echo "{UNREADLINE} $n $s"; fi; done']
 
 ## The jobs of the user in the scheduler queue, one `JOBLINE id|state|name|working folder|its physical path` line each (empty folders when
 ## the scheduler does not tell them), after a `QUEUELINE slurm|sge|other|none|error` line. `scope run` submits its jobs and ends, so the queue is where a cluster run
@@ -686,14 +700,15 @@ _QUEUE_LINES = ['U=${USER:-$(id -un)}',
                 'else echo "' + QUEUELINE + ' none"; fi']
 
 def list_runs_script(p: Profile) -> str:
-    """Lists the runs of this project that are active, the newest logs with how each run ended, and the user's jobs in the scheduler
-    queue, so a window opened later can find them. Read-only. The system names it reports are the pid_name() form."""
+    """Lists the runs of this project that are active, the newest logs with how each run ended, the outputs SCOPE has not read yet, and
+    the user's jobs in the scheduler queue, so a window opened later can find them. Read-only. The system names of runs are the pid_name()
+    form; those of unread outputs are the folder names."""
     return "\n".join([*_common(p), 'for f in "$ROOT"/logs/run_*.pid; do [ -f "$f" ] || continue; PID=$(cat "$f"); n=$(basename "$f" .pid); n=${n#run_}',
                       'if alive "$PID" "$n"; then A=1; else A=0; fi; L=$(ls -t "$ROOT"/logs/run_"$n"_*.log 2>/dev/null | head -1)',
                       f'echo "{RUNLINE} $n $PID $A $L"; done', f'for f in $(ls -t "$ROOT"/logs/run_*_*.log 2>/dev/null | head -5); do echo "__SCOPE_GUI_LOG__ $f"; done',
                       'ls -t "$ROOT"/logs/run_*_*.log 2>/dev/null | head -50 | while IFS= read -r f; do',
                       f'  C=$(tail -n 3 "$f" 2>/dev/null | grep "^{EXIT_MARKER_REMOTE} " | tail -n 1 | cut -d" " -f2); echo "{LASTLINE} ${{C:--}} $f"; done',
-                      *_QUEUE_LINES]) + "\n"
+                      *_QUEUE_LINES, *_UNREAD_LINES]) + "\n"
 
 @dataclass
 class QueuedJob:
@@ -723,8 +738,9 @@ def log_system(path: str) -> str:
 def parse_runs(stdout: str) -> dict:
     """{'active': [(system, pid, log)], 'logs': [paths, newest first], 'last': {system: (newest log, exit code or None)},
         'scheduler': 'slurm', 'sge', 'other' (one this window cannot read), 'none', 'error' or None (not asked),
-        'jobs': [QueuedJob], 'root_real': the project folder with every link resolved ('' if unknown)}"""
-    active, logs, last, scheduler, jobs, root_real = [], [], {}, None, [], ""
+        'jobs': [QueuedJob], 'root_real': the project folder with every link resolved ('' if unknown),
+        'unread': {system folder name: number of files SCOPE has not read yet (at most MAX_UNREAD)}}"""
+    active, logs, last, scheduler, jobs, root_real, unread = [], [], {}, None, [], "", {}
     for line in stdout.splitlines():
         if line.startswith(RUNLINE):
             parts = line.split()
@@ -740,13 +756,27 @@ def parse_runs(stdout: str) -> dict:
             last[system] = (parts[2].strip(), code)
         elif line.startswith(QUEUELINE + " "): scheduler = line.split()[1]
         elif line.startswith(REALROOT): root_real = line[len(REALROOT):].strip()
+        elif line.startswith(UNREADLINE + " "):
+            parts = line.split(None, 2)
+            if len(parts) == 3 and parts[1].isdigit(): unread[parts[2].strip()] = int(parts[1])
         elif line.startswith(JOBLINE + " "):
             fields = line[len(JOBLINE) + 1:].split("|", 3)
             if len(fields) < 3 or not fields[0].strip(): continue
             rest = fields[3] if len(fields) > 3 else ""
             workdir, _, realdir = rest.rpartition("|") if "|" in rest else (rest, "", "")
             jobs.append(QueuedJob(fields[0].strip(), fields[1].strip(), fields[2].strip(), workdir.strip(), realdir.strip()))
-    return {"active": active, "logs": logs, "last": last, "scheduler": scheduler, "jobs": jobs, "root_real": root_real}
+    return {"active": active, "logs": logs, "last": last, "scheduler": scheduler, "jobs": jobs, "root_real": root_real, "unread": unread}
+
+def unread_count(found: dict, system: str) -> int:
+    """Files of `system` (its name or its pid_name() form) that SCOPE has not read yet, from what list_runs_script found."""
+    return sum(n for name, n in found.get("unread", {}).items() if name == system or pid_name(name) == pid_name(system))
+
+def unread_text(n: int, system: str) -> str:
+    """What to do about outputs SCOPE has not read yet, in one sentence block (shared by the Cluster page and the Runs page)."""
+    many = f"{n}{'+' if n >= MAX_UNREAD else ''} file(s)"
+    return (f"{many} of '{system}' on the cluster were written after SCOPE last saved the system, so their results are not in it yet. "
+            "SCOPE reads outputs when it runs again: press Run on the cluster again, then Download results… with the system file; "
+            "or download the outputs and run the system on this computer.")
 
 def jobs_by_system(jobs: list, root: str, systems: "Iterable[str]"=(), root_real: str="") -> dict:
     """{system: [QueuedJob]} for the jobs that belong to the project in `root`.
