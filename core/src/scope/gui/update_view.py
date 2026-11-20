@@ -22,7 +22,7 @@ class UpdatesDialog(QDialog):
         self.message = QLabel(); self.message.setWordWrap(True); self.message.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self.check_btn, self.update_btn, self.restart_btn, close = QPushButton("Check now"), QPushButton("Update"), QPushButton("Restart the window"), QPushButton("Close")
         self.update_btn.setProperty("primary", True); self.restart_btn.setProperty("primary", True); self.restart_btn.hide()
-        self.update_btn.setToolTip("Moves this copy forward to the branch it follows (git merge --ff-only). Only offered when no local change or commit would be affected.")
+        self.update_btn.setToolTip("Moves this copy forward to the main branch on GitHub (git merge --ff-only). Only offered when no local change or commit would be affected.")
         self.restart_btn.setToolTip("Closes this window and opens it again with the new code. Runs keep going: they do not depend on the window.")
         row = QHBoxLayout(); row.addWidget(self.check_btn); row.addStretch(1); row.addWidget(close); row.addWidget(self.restart_btn); row.addWidget(self.update_btn)
         lay = QVBoxLayout(self); lay.addWidget(self.head); lay.addWidget(self.auto); lay.addWidget(self.log, 1); lay.addWidget(self.message); lay.addLayout(row)
@@ -60,9 +60,9 @@ class UpdatesDialog(QDialog):
         self.head.setText(f"<b>This copy</b>: branch <b>{html.escape(st.branch or '(no branch)')}</b>, commit {st.head} of {st.date}{dirty}<br><span style='color:{c['sub']}'>{html.escape(st.repo)} · {when}</span>")
         lines = []
         for t in st.targets:
-            role = "followed by this branch" if t.followed else "main branch"
-            if not t.exists: lines.append(f"{t.ref:<22} ({role}) not fetched yet: press Check now"); continue
-            lines.append(f"{t.ref:<22} ({role}) {t.behind} new commit(s) for this copy, {t.ahead} commit(s) here that it lacks")
+            role = "updates come from here" if t.followed else "for information"
+            if not t.exists: lines.append(f"{t.ref:<18} ({role}) not fetched yet: press Check now"); continue
+            lines.append(f"{t.ref:<18} ({role}) {t.behind} new commit(s) for this copy, {t.ahead} commit(s) here that it lacks")
             lines += [f"    {line}" for line in t.new] + ([f"    … and {t.behind - len(t.new)} more"] if t.behind > len(t.new) else [])
         if not st.targets: lines.append("No remote branch to compare with (no 'origin' or 'upstream' remote).")
         self.log.setPlainText("\n".join(lines))

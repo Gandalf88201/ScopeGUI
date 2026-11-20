@@ -471,6 +471,9 @@ class RemoteTab(QWidget):
                 self.log.appendPlainText(note + " Wait for them, then run again: SCOPE collects their results and goes on. Runs → Check the clusters shows the queue.")
                 self.status.setText(note + " Wait for them, then run again.")
             elif found.get("scheduler") in ("error", "other"): self.status.setText("Cluster run finished with exit code 0, but the scheduler queue could not be read: its jobs may still be waiting.")
+            elif remote.unread_count(found, system):
+                note = remote.unread_text(remote.unread_count(found, system), system)
+                self.log.appendPlainText(note); self.status.setText("Cluster run finished with exit code 0, but some results are not read yet. " + note)
             else: self.status.setText("Cluster run finished with exit code 0. Press Download results… to bring the results back.")
         self.background(lambda: remote.parse_runs(remote.run_script(p, remote.list_runs_script(p), timeout=30).stdout), done, "Cluster run finished with exit code 0. Looking at the scheduler queue…")
 
@@ -506,6 +509,8 @@ class RemoteTab(QWidget):
             else:
                 jobs = remote.queued_jobs(found, p.remote_root, remote.pid_name(current)) if current else []
                 waiting = f"{len(jobs)} job(s) of '{current}' are still in the scheduler queue ({remote.jobs_summary(jobs)}): wait for them, then run again." if jobs else ""
+                unread = remote.unread_count(found, current) if current and not jobs and found.get("scheduler") not in ("error", "other") else 0
+                if unread: waiting = remote.unread_text(unread, current)
                 if found["logs"]: self.log.appendPlainText(f"No SCOPE run is active on the cluster. The latest log is {found['logs'][0]}" + (f"\n{waiting}" if waiting else ""))
                 self.status.setText(f"No active SCOPE run. {waiting}" if waiting else "No active run." if found["logs"] else "No run found on the cluster for this project.")
         self.background(lambda: remote.parse_runs(remote.run_script(p, remote.list_runs_script(p), timeout=30).stdout), done, f"Looking for runs on {p.host}…")

@@ -18,6 +18,7 @@ from scope.gui import backend, remote, theme, workspaces
 from scope.gui.tasks import Task
 
 WAITING  = "waiting for jobs"
+NOT_READ = "done, results not read yet"                                    ## the jobs ended after SCOPE last saved: their results are not in the system file yet
 NO_QUEUE = "—"                                                              ## Jobs column of a run with no scheduler queue to look at
 COLUMNS  = ["Workspace", "System", "Where", "State", "Jobs", "Started", "Log"]
 
@@ -26,7 +27,8 @@ class RunRow:
     """One line of the Runs page. where is 'this computer' or the SSH host.
 
     state is about the SCOPE run (`scope run`): 'running', 'finished (exit N)', 'stopped', 'ended without finishing', or, on a cluster,
-    'waiting for jobs' when the run has ended but jobs it submitted are still in the scheduler queue. jobs describes that queue
+    'waiting for jobs' when the run has ended but jobs it submitted are still in the scheduler queue, and 'done, results not read yet'
+    when no job is left but files were written after SCOPE last saved the system (unread, see remote.unread_count). jobs describes that queue
     ('1 running, 2 pending', 'none in queue', …); NO_QUEUE for a run on this computer."""
     workspace: str
     system:    str
@@ -39,6 +41,7 @@ class RunRow:
     names:     list = None                                                  ## the workspaces it belongs to (a cluster project can be shared)
     jobs:      str  = NO_QUEUE
     queued:    list = None                                                  ## the remote.QueuedJob of this system in the scheduler queue
+    unread:    int  = 0                                                     ## files on the cluster that SCOPE has not read yet
 
 def ended_text(code: "int | None") -> str:
     """State text of a run that is no longer running, from the exit code its wrapper wrote (None: it wrote none)."""
@@ -97,11 +100,13 @@ def cluster_rows_of(p: "remote.Profile", names: list, found: dict) -> list:
     queued = remote.jobs_by_system(found.get("jobs", []), root, set(active) | set(last), found.get("root_real", ""))
     rows = []
     for system in sorted(set(active) | set(last) | set(queued), key=lambda s: (s not in active, s not in queued, s)):
-        jobs = queued.get(system, [])
+        jobs = queued.get(system, []); unread = remote.unread_count(found, system)
         if system in active: state, log = "running", active[system]
         elif jobs:           state, log = WAITING, last.get(system, ("", None))[0]
-        else:                log, code = last[system]; state = ended_text(code)
-        rows.append(RunRow(", ".join(names), system, p.host, state, log_started(log), log, profile=p, names=list(names), jobs=queue_text(scheduler, jobs), queued=jobs))
+        else:
+            log, code = last[system]; state = ended_text(code)
+            if code == 0 and unread and scheduler not in ("error", "other"): state = NOT_READ     ## an unreadable queue could still hold jobs that write
+        rows.append(RunRow(", ".join(names), system, p.host, state, log_started(log), log, profile=p, names=list(names), jobs=queue_text(scheduler, jobs), queued=jobs, unread=unread))
     return rows
 
 def check_clusters(projects: dict) -> tuple:
@@ -113,9 +118,9 @@ def check_clusters(projects: dict) -> tuple:
         res = remote.run_script(p, remote.list_runs_script(p), timeout=30)
         if not res.ok: messages.append(f"{host}:{root}: not reachable ({(res.stderr.strip().splitlines() or [f'exit code {res.returncode}'])[-1]})"); continue
         found = remote.parse_runs(res.stdout); mine = cluster_rows_of(p, names, found)
-        rows += mine; queued = sum(len(r.queued or []) for r in mine)
+        rows += mine; queued = sum(len(r.queued or []) for r in mine); unread = sum(1 for r in mine if r.state == NOT_READ)
         queue = {"error": ", queue not readable", "other": ", scheduler not recognised (only Slurm and SGE queues are read)", "none": "", None: ""}.get(found.get("scheduler"), f", {queued} job(s) in the queue")
-        messages.append(f"{host}:{root}: {len(found['active'])} active run(s){queue}")
+        messages.append(f"{host}:{root}: {len(found['active'])} active run(s){queue}" + (f", {unread} system(s) with results not read yet" if unread else ""))
     return rows, messages
 
 class RunsPage(QWidget):
@@ -123,7 +128,8 @@ class RunsPage(QWidget):
         super().__init__()
         self.window_, self.rows, self.cluster_rows, self.tasks, self.checked = window, [], [], [], ""
         self.table = QTableWidget(0, len(COLUMNS)); self.table.setHorizontalHeaderLabels(COLUMNS); self.table.verticalHeader().setVisible(False)
-        self.table.horizontalHeaderItem(3).setToolTip("The SCOPE run itself. On a cluster it submits jobs and ends: 'waiting for jobs' means it has ended but jobs it submitted are still in the queue.")
+        self.table.horizontalHeaderItem(3).setToolTip("The SCOPE run itself. On a cluster it submits jobs and ends: 'waiting for jobs' means it has ended but jobs it submitted are still in the queue; "
+                                                     "'done, results not read yet' means the jobs have ended but SCOPE has not read their outputs: run again on the cluster to read them.")
         self.table.horizontalHeaderItem(4).setToolTip("Jobs of this system in the scheduler queue of the cluster, as found by the last Check the clusters. Runs on this computer use no queue.")
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows); self.table.setSelectionMode(QAbstractItemView.SingleSelection); self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         hh = self.table.horizontalHeader(); last = len(COLUMNS) - 1
@@ -149,12 +155,14 @@ class RunsPage(QWidget):
         self.rows = self.cluster_rows + local_rows(spaces); self.render()
 
     def render(self) -> None:
-        c = theme.colors(); colour = {"running": c["ok"], WAITING: c["ok"], "stopped": c["warn"], "ended without finishing": c["warn"]}
+        c = theme.colors(); colour = {"running": c["ok"], WAITING: c["ok"], NOT_READ: c["warn"], "stopped": c["warn"], "ended without finishing": c["warn"]}
         current = self.table.currentRow(); self.table.setRowCount(len(self.rows))
         for i, r in enumerate(self.rows):
             for j, text in enumerate((r.workspace, r.system, r.where, r.state, r.jobs, r.started, r.log)):
                 item = QTableWidgetItem(text)
-                if j == 3: item.setForeground(QBrush(QColor(colour.get(r.state, c["sub"] if r.state.startswith("finished") else c["text"]))))
+                if j == 3:
+                    item.setForeground(QBrush(QColor(colour.get(r.state, c["sub"] if r.state.startswith("finished") else c["text"]))))
+                    if r.state == NOT_READ: item.setToolTip(remote.unread_text(r.unread, r.system))
                 if j == 4:
                     item.setForeground(QBrush(QColor(c["ok"] if r.queued else c["sub"])))
                     if r.queued: item.setToolTip("\n".join(f"{q.id}  {q.state}  {q.name}" for q in r.queued))

@@ -163,6 +163,11 @@ class Summary:
     comps:  list
 
     @property
+    def unread_outputs(self) -> list:
+        """Outputs that are on this computer but that SCOPE has not read yet (it reads them when it runs again), relative to Computations/<system>/."""
+        return [c.out_rel for c in self.comps if c.group == "unregistered"]
+
+    @property
     def missing_outputs(self) -> list:
         """Outputs that SCOPE registered (or expects) but that are not on this computer, relative to Computations/<system>/."""
         return [c.out_rel for c in self.comps if not c.out_exists and c.group != "unregistered"]

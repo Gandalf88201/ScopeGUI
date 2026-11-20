@@ -115,7 +115,7 @@ def test_parsers():
     assert remote.parse_started("__SCOPE_GUI_BUSY__ 77\n") == {"state": "busy", "pid": "77"} and remote.parse_started("nothing") == {}
     d = remote.parse_poll("__SCOPE_GUI_SIZE__ 40\n__SCOPE_GUI_ALIVE__ 0\n__SCOPE_GUI_BEGIN__\nhello\n__SCOPE_GUI_EXIT__ 0\n")
     assert d == {"alive": False, "text": "hello\n", "bytes": len("hello\n__SCOPE_GUI_EXIT__ 0\n"), "exit": 0}
-    assert remote.parse_runs("__SCOPE_GUI_RUN__ water 5 1 /l/a.log\n__SCOPE_GUI_RUN__ old 6 0 /l/b.log\n__SCOPE_GUI_LOG__ /l/a.log\n") == {"active": [("water", "5", "/l/a.log")], "logs": ["/l/a.log"], "last": {}, "scheduler": None, "jobs": [], "root_real": ""}
+    assert remote.parse_runs("__SCOPE_GUI_RUN__ water 5 1 /l/a.log\n__SCOPE_GUI_RUN__ old 6 0 /l/b.log\n__SCOPE_GUI_LOG__ /l/a.log\n") == {"active": [("water", "5", "/l/a.log")], "logs": ["/l/a.log"], "last": {}, "scheduler": None, "jobs": [], "root_real": "", "unread": {}}
 
 def test_cluster_run_goes_on_without_the_window_and_blocks_a_second_run(slow_cluster, tmp_path):
     p = slow_cluster

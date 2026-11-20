@@ -71,13 +71,25 @@ def test_a_branch_of_its_own_is_compared_with_main_and_a_fork_with_upstream(repo
     run(mine, "checkout", "-q", "-b", "gui-demo"); commit(mine, "core/src/gui.py", "gui\n", "gui work")
     push_new(colleague)
     st = updates.status(mine)
-    assert st.followed() is None and [t.ref for t in st.targets] == ["origin/main"] and st.targets[0].behind == 1 and st.targets[0].ahead == 1
-    assert not st.can_update() and "does not follow a branch" in st.blocker() and "git merge origin/main" in st.blocker()
+    assert st.followed().ref == "origin/main" and [t.ref for t in st.targets] == ["origin/main"] and st.targets[0].behind == 1 and st.targets[0].ahead == 1
+    assert not st.can_update() and "1 commit(s) of its own" in st.blocker() and "git merge origin/main" in st.blocker()
     fork = str(tmp_path / "fork.git"); run(str(tmp_path), "clone", "-q", "--bare", github, fork)
     run(mine, "remote", "rename", "origin", "upstream"); run(mine, "remote", "add", "origin", fork); run(mine, "push", "-q", "-u", "origin", "gui-demo")
     st = updates.status(mine)
-    assert [t.ref for t in st.targets] == ["origin/gui-demo", "upstream/main"] and st.followed().ref == "origin/gui-demo" and st.targets[1].behind == 1
-    assert st.summary() == ("info", "Up to date with origin/gui-demo")
+    assert [t.ref for t in st.targets] == ["origin/main", "upstream/main"] and st.followed().ref == "origin/main" and st.targets[1].behind == 1       # the fork's main, not the branch's own
+    assert st.summary() == ("new", "1 update on origin/main")
+
+def test_updates_come_from_main_even_on_another_branch(repos):
+    """A copy on a branch of its own (gui-demo, pushed to GitHub) is compared with main, not with its own branch on GitHub: once that
+    branch is merged into main and main moves on, Update brings the branch to main."""
+    github, mine, colleague = repos
+    run(mine, "checkout", "-q", "-b", "gui-demo"); commit(mine, "core/src/gui.py", "gui\n", "gui work"); run(mine, "push", "-q", "-u", "origin", "gui-demo")
+    run(colleague, "fetch", "-q", "origin"); run(colleague, "merge", "-q", "--no-ff", "-m", "merge gui-demo", "origin/gui-demo"); push_new(colleague, 2)
+    st = updates.status(mine)
+    assert [t.ref for t in st.targets] == ["origin/main"] and st.followed().ref == "origin/main"          # origin/gui-demo is not what updates come from
+    assert st.followed().behind == 3 and st.followed().ahead == 0 and st.summary() == ("new", "3 updates on origin/main") and st.can_update()
+    ok, message, _ = updates.update(mine)
+    assert ok and run(mine, "rev-parse", "HEAD") == run(mine, "rev-parse", "origin/main") and run(mine, "symbolic-ref", "--short", "HEAD") == "gui-demo"
 
 def test_no_network_no_git_checkout_and_no_prompt(repos, tmp_path):
     github, mine, colleague = repos
