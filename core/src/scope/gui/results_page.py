@@ -611,9 +611,10 @@ class ResultsTab(QWidget):
         self.tabs.addTab(scrolled(self.thermo), "Thermochemistry"); self.tabs.addTab(scrolled(self.compare), "Compare")
         self.table.cellDoubleClicked.connect(self.open_state); self.table.setToolTip("Double-click a state to see it in detail (State tab)")
         ## Actions
-        self.reload_btn, self.folder_btn, self.missing_btn = QPushButton("Reload"), QPushButton("Show folder"), QPushButton("Download missing outputs…")
+        self.reload_btn, self.folder_btn, self.missing_btn = QPushButton("Reload"), QPushButton("Show folder"), QPushButton("Download from the cluster…")
         self.reload_btn.clicked.connect(lambda: self.load(force=True)); self.folder_btn.clicked.connect(self.show_folder); self.missing_btn.clicked.connect(self.download_missing)
-        self.missing_btn.setToolTip("Opens the download of the Cluster page with the outputs that SCOPE registered but that are not on this computer already ticked.")
+        self.missing_btn.setToolTip("Opens the download of the Cluster page for this system: the outputs SCOPE registered that are not on this computer are ticked; "
+                                    "otherwise the outputs on the cluster and its system file when it is newer (results computed there).")
         def menu_button(text: str, tip: str, entries: list, main=None) -> QToolButton:
             """A button with a menu; with `main`, a click on the button does it and the arrow opens the menu."""
             b = QToolButton(); b.setText(text); b.setToolTip(tip); m = QMenu(b); [m.addAction(t, f) for t, f in entries]; b.setMenu(m)
@@ -688,7 +689,7 @@ class ResultsTab(QWidget):
         self.loaded, self.shown_print = loaded, results.fingerprint(loaded.provenance.file)
         self.show_provenance(); self.fill_overview(); self.fill_tree(); self.state.set_loaded(loaded); self.thermo.set_loaded(loaded); self.watch(); self.timer.start()
         for b in (self.reload_btn, self.folder_btn, self.notebook_btn, self.export_btn): b.setEnabled(True)
-        self.missing_btn.setEnabled(bool(loaded.summary.missing_outputs)); self.fill_older()
+        self.update_download_button(); self.fill_older()
         if self.window_ is not None and hasattr(self.window_, "update_steps"): self.window_.update_steps()          ## the step dot: results shown
 
     def loaded_failed(self, name: str, message: str) -> None:
@@ -749,7 +750,7 @@ class ResultsTab(QWidget):
             self.load(force=True)
 
     def showEvent(self, event) -> None:
-        super().showEvent(event); self.watch()
+        super().showEvent(event); self.watch(); self.update_download_button()      ## the cluster project may have been set meanwhile
 
     ##### tables #####
     def fill_overview(self) -> None:
@@ -791,7 +792,7 @@ class ResultsTab(QWidget):
     def open_item(self, it: "QTreeWidgetItem | None", _column: int=0) -> None:
         path = it.data(0, Qt.UserRole) if it is not None else None
         if not path: return
-        if not os.path.isfile(path): self.say(f"The output is not on this computer: {path}. Use Download missing outputs…", "warn"); return
+        if not os.path.isfile(path): self.say(f"The output is not on this computer: {path}. Use Download missing outputs… (or Download from the cluster…)", "warn"); return
         viewer = LogViewer(self, path, f"{it.text(0)} · {os.path.basename(path)}"); self.viewers = [v for v in self.viewers if v.isVisible()] + [viewer]; viewer.show()
 
     def open_state(self, row: int, _column: int=0) -> None:
@@ -806,6 +807,22 @@ class ResultsTab(QWidget):
         name, text = self.current_export()
         if text: QGuiApplication.clipboard().setText(text)
         else: self.say("Nothing to copy in this tab yet.", "warn")
+
+    def has_cluster(self) -> bool:
+        """Whether this workspace has a cluster project to download from (a profile and a project folder on the Cluster page)."""
+        tab = getattr(self.window_, "remote_tab", None)
+        return bool(tab and tab.chooser.currentIndex() >= 0 and tab.project()[0])
+
+    def update_download_button(self) -> None:
+        """Enabled whenever there is a cluster to download from: results computed there may not be in this computer's system file yet,
+        so an empty list of missing outputs is no reason to grey it out (reported)."""
+        missing = len(self.loaded.summary.missing_outputs) if self.loaded else 0
+        self.missing_btn.setText(f"Download missing outputs ({missing})…" if missing else "Download from the cluster…")
+        self.missing_btn.setEnabled(bool(self.loaded) and self.has_cluster())
+        self.missing_btn.setToolTip(("Opens the download of the Cluster page for this system with the outputs that are not on this computer ticked." if missing else
+                                     "Opens the download of the Cluster page for this system: its outputs on the cluster and, when it is newer, the cluster's system file "
+                                     "(results computed there that this computer has not seen yet).") if self.has_cluster() else
+                                    "No cluster project in this workspace: set one on the Cluster page (step 5) to download results computed there.")
 
     def download_missing(self) -> None:
         if not self.loaded or self.window_ is None: return

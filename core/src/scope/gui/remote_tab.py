@@ -98,8 +98,16 @@ class RemoteTab(QWidget):
         self.log, self.status = QPlainTextEdit(), QLabel("Nothing has been sent to the cluster yet."); self.log.setReadOnly(True); self.log.setLineWrapMode(QPlainTextEdit.NoWrap); self.status.setWordWrap(True)
         self.hint = QLabel(); self.hint.setWordWrap(True)
         self.lights = remote.unchecked_lights(); self.checked_at = ""
-        self.lights_row = QHBoxLayout(); self.lights_title = QLabel("On the cluster:"); self.lights_row.addWidget(self.lights_title)
-        self.light_labels = [QLabel() for _ in range(3)]; [l.setWordWrap(True) for l in self.light_labels]; [self.lights_row.addWidget(l) for l in self.light_labels]; self.lights_row.addStretch(1); self.when = QLabel(); self.when.setObjectName("pagesub"); self.lights_row.addWidget(self.when)
+        ## the software on the cluster: three equal tiles (dot and name, then the state), the time of the check on the right
+        self.lights_title = QLabel("Software on the cluster"); self.lights_title.setObjectName("cardtitle")
+        self.when = QLabel(); self.when.setObjectName("pagesub")
+        lights_head = QHBoxLayout(); lights_head.addWidget(self.lights_title); lights_head.addStretch(1); lights_head.addWidget(self.when)
+        tiles = QGridLayout(); tiles.setHorizontalSpacing(10); tiles.setContentsMargins(0, 0, 0, 0); self.light_tiles, self.light_labels = [], []
+        for i in range(3):
+            tile = QFrame(); tile.setObjectName("lighttile"); tl = QVBoxLayout(tile); tl.setContentsMargins(12, 8, 12, 8)
+            label = QLabel(); label.setWordWrap(True); label.setTextFormat(Qt.RichText); tl.addWidget(label)
+            tiles.addWidget(tile, 0, i); tiles.setColumnStretch(i, 1); self.light_tiles.append(tile); self.light_labels.append(label)
+        self.lights_row = QVBoxLayout(); self.lights_row.setSpacing(6); self.lights_row.setContentsMargins(0, 6, 0, 0); self.lights_row.addLayout(lights_head); self.lights_row.addLayout(tiles)
 
         ##### layout: three cards, in the order of use: the cluster account, this workspace's project, then transfer and run #####
         def field(label: str, widget, left: bool=False) -> QVBoxLayout:
@@ -365,8 +373,8 @@ class RemoteTab(QWidget):
         """Draws the three lights (SCOPE, Quantum ESPRESSO, Gaussian 16): green available, amber doubtful, red missing, grey not checked or not set."""
         c = theme.colors(); colour = {"green": c["ok"], "amber": c["warn"], "red": c["err"], "grey": c["sub"]}
         for label, light in zip(self.light_labels, self.lights):
-            label.setText(f'<span style="color:{colour[light.state]}; font-size:17px">●</span>&nbsp;<b>{light.name}</b> <span style="color:{c["sub"]}">{light.short}</span>&nbsp;&nbsp;')
-            label.setToolTip(light.detail); label.setTextFormat(Qt.RichText)
+            label.setText(f'<span style="color:{colour[light.state]}; font-size:15px">●</span>&nbsp;<b>{light.name}</b><br><span style="color:{c["sub"]}">{light.short}</span>')
+            label.setToolTip(light.detail); label.parentWidget().setToolTip(light.detail)
         self.when.setText(f"checked {self.checked_at}" if self.checked_at else "")
 
     def show_checks(self, outcome) -> None:

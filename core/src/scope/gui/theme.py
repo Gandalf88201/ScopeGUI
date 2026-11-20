@@ -105,6 +105,7 @@ def stylesheet(c: dict) -> str:
     QListWidget#manualtoc::item:disabled {{ color: {c['sub']}; padding-top: 14px; }}
     QTextBrowser#manualview {{ background: {c['base']}; border: 1px solid {c['border']}; border-radius: 10px; padding: 0; }}
     QFrame#card {{ background: {c['base']}; border: 1px solid {c['border']}; border-radius: 10px; }}
+    QFrame#lighttile {{ background: {c['alt']}; border: 1px solid {c['border']}; border-radius: 8px; }}
     QLabel#restitle {{ font-size: 18px; font-weight: 700; color: {c['text']}; }}
     QLabel#cardtitle {{ color: {c['sub']}; font-size: 11px; font-weight: 700; letter-spacing: 1px; text-transform: uppercase; }}
     QListWidget#navlist {{ background: transparent; border: none; outline: 0; }}

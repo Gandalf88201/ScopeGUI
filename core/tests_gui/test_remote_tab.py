@@ -103,3 +103,26 @@ def test_run_warns_when_the_software_is_missing(cluster, local, tmp_path, monkey
     assert tab.lights[2].state == "grey"
     tab.run_remote()
     assert asked and "WARNING from the last connection test" in asked[-1] and "opt.scope needs Gaussian 16" in asked[-1]
+
+def test_results_download_button_works_without_missing_outputs(cluster, local, tmp_path, monkeypatch):
+    """Reported: 'Download missing outputs…' did nothing for a system whose results were computed on the cluster: the button was greyed
+    out because this computer's system file listed no outputs yet. It is now enabled whenever the workspace has a cluster project."""
+    from types import SimpleNamespace
+    from PySide6.QtWidgets import QApplication
+    from scope.gui.window import MainWindow
+    QApplication.instance() or QApplication([])
+    env, info = local
+    win = MainWindow(); win.session.set_environment(env, info); tab, res = win.remote_tab, win.results_tab
+    res.loaded = SimpleNamespace(summary=SimpleNamespace(missing_outputs=[]), provenance=SimpleNamespace(system="water"))
+    res.update_download_button()
+    assert not res.missing_btn.isEnabled() and "No cluster project" in res.missing_btn.toolTip()      # nothing to download from yet
+    tab.name.setText("fake"); tab.host.setEditText(cluster.host); tab.scope_bin.setText(cluster.scope_bin); tab.root.setText(cluster.remote_root); tab.env_file.setText(cluster.remote_env)
+    assert tab.save_profile()
+    res.update_download_button()
+    assert res.missing_btn.isEnabled() and res.missing_btn.text() == "Download from the cluster…"
+    opened = []; monkeypatch.setattr(tab, "open_download", lambda **k: opened.append(k))
+    res.missing_btn.click(); assert opened == [{"system": "water", "wanted": []}]
+    res.loaded.summary.missing_outputs = ["demo/opt.log", "demo/freq.log"]; res.update_download_button()
+    assert res.missing_btn.text() == "Download missing outputs (2)…"
+    res.missing_btn.click(); assert opened[-1] == {"system": "water", "wanted": ["demo/opt.log", "demo/freq.log"]}
+    win.close()
