@@ -126,3 +126,23 @@ def test_results_download_button_works_without_missing_outputs(cluster, local, t
     assert res.missing_btn.text() == "Download missing outputs (2)…"
     res.missing_btn.click(); assert opened[-1] == {"system": "water", "wanted": ["demo/opt.log", "demo/freq.log"]}
     win.close()
+
+def test_read_on_the_cluster_runs_scope_there_for_this_system(cluster, local, monkeypatch):
+    """Reported: an output downloaded from the cluster said 'run SCOPE to read it' without saying how. Read on the cluster… opens the
+    Cluster page with this system and starts its Run (which asks first); finished jobs are not submitted again."""
+    from types import SimpleNamespace
+    from PySide6.QtWidgets import QApplication
+    from scope.gui.window import MainWindow
+    QApplication.instance() or QApplication([])
+    env, info = local
+    win = MainWindow(); win.session.set_environment(env, info); tab, res = win.remote_tab, win.results_tab
+    res.loaded = SimpleNamespace(summary=SimpleNamespace(missing_outputs=[], unread_outputs=["demo/freq.log"]), provenance=SimpleNamespace(system="water"))
+    res.update_download_button(); assert not res.read_btn.isEnabled()                       # no cluster project yet
+    tab.name.setText("fake"); tab.host.setEditText(cluster.host); tab.scope_bin.setText(cluster.scope_bin); tab.root.setText(cluster.remote_root); tab.env_file.setText(cluster.remote_env)
+    assert tab.save_profile(); res.update_download_button()
+    assert res.read_btn.isEnabled() and res.read_btn.property("primary")                    # outputs wait to be read: it is the button to press
+    started = []; monkeypatch.setattr(tab, "run_remote", lambda: started.append(tab.system.currentText()))
+    res.read_btn.click()
+    from scope.gui.window import STEPS
+    assert started == ["water"] and win.tabs.currentIndex() == [k for k, *_ in STEPS].index("cluster")   # the Cluster page, this system, its Run
+    win.close()

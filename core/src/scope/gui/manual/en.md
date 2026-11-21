@@ -481,7 +481,7 @@ system, prov = open_system("/path/to/scope_env_<name>.npy", "water")
 
 | Note | Meaning |
 |---|---|
-| *N outputs not read yet* | These outputs are on this computer, but SCOPE has not read them, so their energies and frequencies are not in the system file (rows marked ◌). Run the system on the Run page to read them; for outputs from the cluster you can instead run again on the cluster and download the system file |
+| *N outputs not read yet* | These outputs are on this computer, but SCOPE has not read them, so their energies and frequencies are not in the system file (rows marked ◌). Outputs computed on the cluster: press **Read on the cluster…** (it opens the Cluster page with this system and starts Run there, after you confirm; SCOPE reads the outputs and finished jobs are not submitted again), then **Download from the cluster…** with the system file. Outputs computed here: run the system on the Run here page |
 | *N output file(s) are not on this computer* | SCOPE registered (or expects) these outputs, but they are not here: still running, not downloaded, or not started. Energies and frequencies are in the system file and are shown anyway; reading an output needs the file. **Download missing outputs (N)…** opens the download of the Cluster page with exactly those files ticked. Without missing outputs the button reads **Download from the cluster…** and opens the same download with the usual choice: the outputs on the cluster and its system file when it is newer, which is how results computed there reach this computer. It is enabled whenever the workspace has a cluster project |
 | *Saved by SCOPE x, read by y* | The file comes from another SCOPE version. Values are read as stored |
 | *Newer RDKit* | The system file holds molecules written by a newer RDKit than this one. They are read, and RDKit's warnings (two lines per molecule in the terminal) are counted into this one note. Energies and frequencies are SCOPE's own numbers and are not affected |
@@ -533,7 +533,7 @@ A state with no frequencies and no excited states (an `initial` state, a single 
 
 With one state the plot shows G − H<sub>elec</sub>, H<sub>vib</sub> and −T·S against temperature, and the line under it gives G at the chosen temperature. With two states (A minus B) it shows ΔG, ΔH and −TΔS. Where ΔG crosses zero the two states are equally stable: for the high- and low-spin states of a spin-crossover compound this is T½. If ΔG keeps its sign, the page says which state is the more stable throughout.
 
-The numbers are SCOPE's own (`state.get_thermal_data`), per formula unit (cells: divided by Z). Translational and rotational terms are not included, as in SCOPE. The calculation runs on a copy of the state, so nothing in the system changes. **Copy data (CSV)** and **Save plot…** export what is shown.
+The numbers are SCOPE's own (`state.get_thermal_data`), per formula unit (cells: divided by Z). A molecule is one formula unit (Z = 1). A cell's Z comes from its state or, for a state without atoms (a frequency job that writes a new state stores the modes but not the coordinates), from another state of the same source; the IR and VDOS spectra use the same Z. Translational and rotational terms are not included, as in SCOPE. The calculation runs on a copy of the state, so nothing in the system changes. **Copy data (CSV)** and **Save plot…** export what is shown.
 
 > **Note.** Subtracting two states of different formula or method is allowed but warned about: their ΔG has no meaning.
 

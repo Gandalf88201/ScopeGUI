@@ -630,7 +630,10 @@ class ResultsTab(QWidget):
         self.older_btn.setToolTip("Copies of this system file kept by downloads and by changes on the Systems page (<system>.npy.bak-<time>, the newest 10 of edits): open one beside the current file")
         files, more = QHBoxLayout(), QHBoxLayout(); files.setSpacing(8); more.setSpacing(8)      ## two rows: the window can be narrow
         [files.addWidget(b) for b in (self.reload_btn, self.folder_btn, self.export_btn, self.older_btn)]; files.addStretch(1)
-        [more.addWidget(b) for b in (self.notebook_btn, self.missing_btn)]; more.addStretch(1)
+        self.read_btn = QPushButton("Read on the cluster…"); self.read_btn.clicked.connect(self.read_on_cluster)
+        self.read_btn.setToolTip("Runs SCOPE on the cluster for this system (Cluster page, after you confirm), so that it reads the outputs of the jobs that ended there. "
+                                 "Finished jobs are not submitted again. Then Download from the cluster… brings the updated system file here.")
+        [more.addWidget(b) for b in (self.notebook_btn, self.read_btn, self.missing_btn)]; more.addStretch(1)
         actions = QVBoxLayout(); actions.setSpacing(6); actions.addLayout(files); actions.addLayout(more)
         self.message.hide()
         self.jupyter, self.jupyter_root, self.jupyter_pending, self.dialogs = None, "", [], []           ## the Jupyter Lab this window started, the folder it serves, notebooks to open once it is up
@@ -665,7 +668,7 @@ class ResultsTab(QWidget):
     def clear(self, message: str) -> None:
         self.loaded, self.shown_print = None, ()
         self.title.setText(self.current() or "Results"); self.prov.setText(message); self.banner.hide(); self.issues.hide(); self.table.setRowCount(0); self.tree.clear(); self.state.set_loaded(None); self.thermo.set_loaded(None)
-        for b in (self.reload_btn, self.folder_btn, self.missing_btn, self.notebook_btn, self.export_btn, self.older_btn): b.setEnabled(False)
+        for b in (self.reload_btn, self.folder_btn, self.missing_btn, self.read_btn, self.notebook_btn, self.export_btn, self.older_btn): b.setEnabled(False)
 
     ##### loading (worker thread) #####
     def load(self, force: bool=False) -> None:
@@ -711,7 +714,8 @@ class ResultsTab(QWidget):
         if p.moved: notes.append(("from another computer", f"The file was written where SCOPE ran (<code>{p.stored_root}</code>); its paths are pointed at this computer's folders for reading. Nothing is changed on disk."))
         if p.version_differs: notes.append((f"saved by SCOPE {p.saved_version}", f"Saved by SCOPE {p.saved_version}, read by {p.local_version}: values are read as stored, but objects from very different versions may miss newer fields."))
         if s.unread_outputs: notes.append((f"{len(s.unread_outputs)} outputs not read yet", f"{len(s.unread_outputs)} output file(s) are on this computer but SCOPE has not read them yet, so their energies and frequencies are not in the system file (marked ◌). "
-                                            "SCOPE reads outputs when it runs: run the system on the Run page to read them here. If they came from the cluster, you can instead press Run on the cluster again and download the system file."))
+                                            "SCOPE reads outputs only when it runs. Computed on the cluster: press <i>Read on the cluster…</i> (SCOPE runs there and reads them; finished jobs are not submitted again), "
+                                            "then <i>Download from the cluster…</i> with the system file. Computed on this computer: run the system on the Run here page."))
         doubtful = [r for r in s.states if r.group in ("partial", "unconverged")]
         if doubtful: notes.append((f"{len(doubtful)} states not converged", f"{len(doubtful)} state(s) hold values from a calculation that did not finish normally (◐) or did not converge (≈): "
                                    + ", ".join(f"{r.source} · {r.state}" for r in doubtful[:8]) + ("…" if len(doubtful) > 8 else "") + ". SCOPE stores the last values it could extract; treat them as provisional."))
@@ -818,11 +822,19 @@ class ResultsTab(QWidget):
         so an empty list of missing outputs is no reason to grey it out (reported)."""
         missing = len(self.loaded.summary.missing_outputs) if self.loaded else 0
         self.missing_btn.setText(f"Download missing outputs ({missing})…" if missing else "Download from the cluster…")
-        self.missing_btn.setEnabled(bool(self.loaded) and self.has_cluster())
+        self.missing_btn.setEnabled(bool(self.loaded) and self.has_cluster()); self.read_btn.setEnabled(bool(self.loaded) and self.has_cluster())
+        self.read_btn.setProperty("primary", bool(self.loaded and getattr(self.loaded.summary, "unread_outputs", None))); self.read_btn.style().unpolish(self.read_btn); self.read_btn.style().polish(self.read_btn)
         self.missing_btn.setToolTip(("Opens the download of the Cluster page for this system with the outputs that are not on this computer ticked." if missing else
                                      "Opens the download of the Cluster page for this system: its outputs on the cluster and, when it is newer, the cluster's system file "
                                      "(results computed there that this computer has not seen yet).") if self.has_cluster() else
                                     "No cluster project in this workspace: set one on the Cluster page (step 5) to download results computed there.")
+
+    def read_on_cluster(self) -> None:
+        """Read on the cluster…: the Cluster page's Run for this system (it confirms first and checks the files are there). SCOPE reads the
+        outputs of jobs that ended and saves them in the cluster's system file; Download from the cluster… then brings that file here."""
+        if not self.loaded or self.window_ is None: return
+        tab = self.window_.remote_tab; tab.system.setCurrentText(self.loaded.provenance.system)
+        self.window_.show_step("cluster"); tab.run_remote()
 
     def download_missing(self) -> None:
         if not self.loaded or self.window_ is None: return

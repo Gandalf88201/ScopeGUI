@@ -130,7 +130,7 @@ class CompRow:
     @property
     def status_text(self) -> str:
         if self.group == "waiting":      return "no output here (still running, not downloaded, or not started)"
-        if self.group == "unregistered": return "output here, not registered yet (run SCOPE to read it)"
+        if self.group == "unregistered": return "output here, not read by SCOPE yet (Read on the cluster…, or Run here)"
         if self.group in GROUP_TEXT:     return GROUP_TEXT[self.group]
         return STATUS_TEXT.get(self.status, self.status or "unknown")
 
@@ -592,13 +592,28 @@ def find_state(obj: object, source: str, state: str) -> object:
             if st.name == state: return src, st
     raise KeyError(f"No state '{state}' in source '{source}'")
 
+def formula_units(src: object, st: object) -> "float | None":
+    """Z, the formula units a state holds, as used for 'per formula unit' (IR, VDOS, thermochemistry).
+
+    A molecule (source of type 'specie') is one unit: 1, without asking SCOPE, whose get_z needs the state's atoms (a frequency job that writes
+    a new state stores modes without coordinates) and refuses a species made of several fragments (a pi-stacked dimer). For a cell, SCOPE's Z
+    of this state or, when it has no atoms, of another state of the same source that has them (Z does not change along a cell's states).
+    None when no state can tell."""
+    if getattr(src, "object_type", "") != "cell": return 1.0
+    for s in [st] + [x for x in (getattr(src, "states", None) or []) if x is not st]:
+        if not len(getattr(s, "labels", None) or []): continue
+        try:
+            z = float(s.Z)
+            if z > 0: return z
+        except Exception: continue
+    return None
+
 def state_detail(obj: object, source: str, state: str) -> StateDetail:
     from scope.gui import structure
     src, st = find_state(obj, source, state)
     modes = [Mode(int(getattr(v, "index", i + 1) or i + 1), float(v.freq_cm), _num(getattr(v, "IR_int", None)), _num(getattr(v, "red_mass", None)), str(getattr(v, "sym", "") or ""))
              for i, v in enumerate(getattr(st, "VNMs", None) or []) if _num(getattr(v, "freq_cm", None)) is not None]
-    try: z = float(st.Z)
-    except Exception: z = None
+    z = formula_units(src, st)
     return StateDetail(source, state, structure.state_structure(src, st), modes, any((m.ir or 0) > 0 for m in modes), len(getattr(st, "exc_states", None) or []), z)
 
 @dataclass
@@ -621,7 +636,10 @@ def spectrum(obj: object, source: str, state: str, kind: str="ir", function: str
         function (str):              Broadening kernel (KERNELS).
         sigma (float):               Width: cm⁻¹ for IR and VDOS, eV for absorption.
         xmin, xmax (float|None):     Range (cm⁻¹, or nm for absorption); None for SCOPE's defaults (absorption: 200–1000 nm).
-        per_formula_unit (bool):     Divide by the formula units of a cell (IR, VDOS).
+        per_formula_unit (bool):     Divide by the formula units of a cell (IR, VDOS). A molecule is one unit; a cell whose Z is unknown is
+                                     shown per cell (the label says so).
+    SCOPE draws the whole-state curve; dividing by Z here gives what its per_formula_unit=True gives, without SCOPE asking the state for Z
+    (which fails on a state without atoms, such as the one a frequency job writes).
     """
     import numpy as np
     src, st = find_state(obj, source, state)
@@ -631,16 +649,17 @@ def spectrum(obj: object, source: str, state: str, kind: str="ir", function: str
         x, y = st.get_abs_spectrum(lmin=lmin, lmax=lmax, function=function, sigma=sigma)
         sticks = [(float(e.wavelength), float(e.fosc)) for e in (getattr(st, "exc_states", None) or []) if lmin <= float(e.wavelength) <= lmax]
         return Spectrum(list(map(float, x)), list(map(float, y)), sticks, "Wavelength (nm)", "Oscillator strength (broadened)", f"Absorption · {source} · {state}")
-    units = float(st.Z) if per_formula_unit else 1.0
+    z = formula_units(src, st) if per_formula_unit else 1.0
+    units = z or 1.0; per = " per formula unit" if per_formula_unit and z and z != 1 else (" per cell (Z unknown)" if per_formula_unit and z is None else "")
     if kind == "ir":
-        x, y = st.get_ir_spectrum(vmin=xmin, vmax=xmax, function=function, sigma=sigma, per_formula_unit=per_formula_unit)
+        x, y = st.get_ir_spectrum(vmin=xmin, vmax=xmax, function=function, sigma=sigma, per_formula_unit=False)
         sticks = [(float(v.freq_cm), float(v.IR_int) / units) for v in st.VNMs]
-        label = "IR intensity (km/mol" + (" per formula unit)" if per_formula_unit and units != 1 else ")")
-        return Spectrum(list(map(float, x)), list(map(float, y)), sticks, "Wavenumber (cm⁻¹)", label, f"IR · {source} · {state}")
+        label = "IR intensity (km/mol" + per + ")"
+        return Spectrum(list(map(float, x)), [float(v) / units for v in y], sticks, "Wavenumber (cm⁻¹)", label, f"IR · {source} · {state}")
     if kind == "vdos":
-        x, y = st.get_vdos_spectrum(vmin=xmin, vmax=xmax, function=function, sigma=sigma, per_formula_unit=per_formula_unit)
+        x, y = st.get_vdos_spectrum(vmin=xmin, vmax=xmax, function=function, sigma=sigma, per_formula_unit=False); y = np.asarray(y, dtype=float) / units
         sticks = [(float(v.freq_cm), 0.0) for v in st.VNMs]
-        return Spectrum(list(map(float, x)), list(map(float, np.asarray(y))), sticks, "Wavenumber (cm⁻¹)", "Modes per cm⁻¹" + (" per formula unit" if per_formula_unit and units != 1 else ""), f"Vibrational density of states · {source} · {state}")
+        return Spectrum(list(map(float, x)), list(map(float, np.asarray(y))), sticks, "Wavenumber (cm⁻¹)", "Modes per cm⁻¹" + per, f"Vibrational density of states · {source} · {state}")
     raise ValueError(f"Unknown spectrum '{kind}'")
 
 def xyz_text(s: object, comment: str="") -> str:
@@ -719,6 +738,9 @@ def thermo(obj: object, source: str, state: str, temps: list, model: str="HO", i
     if why: raise ValueError(why)
     src, st = find_state(obj, source, state)
     work = copy.copy(st); work.results = dict(st.results)
+    z = formula_units(src, st)
+    if z is None: raise ValueError(f"The formula units (Z) of '{state}' are unknown: no state of '{source}' has the atoms of the cell.")
+    work._z = int(round(z))                                                     ## on the copy only: SCOPE's own Z needs the state's atoms (see formula_units)
     options = {"model": model, "imaginary": imaginary} | ({"FR_cutoff": fr_cutoff, "FR_alpha": fr_alpha} if model == "QRRHO" else {})
     temps = sorted({float(t) for t in temps})
     with _THERMO_LOCK: work.get_thermal_data(temp=temps, vib_options=options)
