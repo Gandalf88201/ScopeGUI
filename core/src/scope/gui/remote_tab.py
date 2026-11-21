@@ -147,7 +147,11 @@ class RemoteTab(QWidget):
         work, wl = card("3 · Transfer and run")
         self.system.setMinimumWidth(120); self.system.setMinimumContentsLength(10); self.system.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
         row2 = QHBoxLayout(); row2.addWidget(QLabel("System")); row2.addWidget(self.system, 1); [row2.addWidget(b) for b in (self.up, self.down)]
-        row3 = QHBoxLayout(); [row3.addWidget(b) for b in (self.run_btn, self.watch_btn, self.stopcl_btn)]; row3.addStretch(1)
+        self.keep_going = QCheckBox("Keep going until every job is done")
+        self.keep_going.setToolTip("One run submits only the jobs that are ready (a freq waits for its opt) and ends. With this, the run stays on the cluster: "
+                                   "after each `scope run` it waits for this system's jobs to leave the queue (it looks every 5 minutes) and runs again, "
+                                   "until no job is left. It stops if a run fails or the queue cannot be read, and after 30 runs. It goes on if you close this window; Stop ends it.")
+        row3 = QHBoxLayout(); [row3.addWidget(b) for b in (self.run_btn, self.keep_going, self.watch_btn, self.stopcl_btn)]; row3.addStretch(1)
         self.pre_up.hide(); self.unwatch_btn.hide()                          ## Upload already shows what it would copy and asks; following a run stops by itself
         self.up.setToolTip("Shows what would be copied (system, input files, and calculation files only here), then asks before copying.")
         sync = QLabel("Keep the input and output files in step wherever the system runs: the system file only records what SCOPE read from them, so copying the .npy alone is not enough. "
@@ -500,8 +504,10 @@ class RemoteTab(QWidget):
         if self.review.level != "ok": note += "\n\nReview table: " + self.review.summary() + " Hover over its Check column for the details."
         checks = self.source_checks(info, system, valid)
         if checks: note += "\n\nCharge and spin (of this computer's system file, as uploaded):\n• " + "\n• ".join(checks[:6]) + ("\n• …" if len(checks) > 6 else "")
-        if QMessageBox.question(self, "Run on the cluster", f"Start `scope run` for '{system}' on {p.host}, with the files uploaded in {p.remote_root}/inputs.\n\nThe run is detached: it keeps going on the cluster if you close this window or lose the connection.{note}") != QMessageBox.Yes: return
-        script = remote.detached_run_script(p, system, [f"{p.remote_root.rstrip('/')}/inputs/{os.path.basename(r.path)}" for r in valid], check_files=True)
+        keep = ("\n\nKeep going until every job is done: the run stays on the cluster. After each `scope run` it waits for this system's jobs to leave the queue "
+                f"(it looks every {remote.KEEP_GOING_POLL // 60} minutes) and runs again, until no job is left; at most {remote.KEEP_GOING_ROUNDS} runs. Stop ends it.") if self.keep_going.isChecked() else ""
+        if QMessageBox.question(self, "Run on the cluster", f"Start `scope run` for '{system}' on {p.host}, with the files uploaded in {p.remote_root}/inputs.\n\nThe run is detached: it keeps going on the cluster if you close this window or lose the connection.{keep}{note}") != QMessageBox.Yes: return
+        script = remote.detached_run_script(p, system, [f"{p.remote_root.rstrip('/')}/inputs/{os.path.basename(r.path)}" for r in valid], check_files=True, keep_going=self.keep_going.isChecked())
         self.log.appendPlainText(f"\n$ {remote.ssh_display(p)}  (start `scope set_path` and `scope run` for {system}, detached)\n")
         self.background(lambda: remote.run_script(p, script, timeout=60), lambda res: self.started(p, system, res), f"Starting the run on {p.host}…")
 

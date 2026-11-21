@@ -699,13 +699,53 @@ def sync(items: list, dry_run: bool, p: "Profile | None"=None) -> list:
 ##############
 ### Remote run ###
 ##############
-def run_script_text(p: Profile, system: str, remote_inputs: list, quiet: bool=False, verbose: bool=False, errors: bool=False, set_path: bool=True) -> str:
-    """The script for `scope run` on the cluster. It first runs `scope set_path` from the project folder, so the paths inside the uploaded system point to the cluster folders."""
+KEEP_GOING_POLL, KEEP_GOING_ROUNDS = 300, 30                                  ## keep going: look at the queue every 5 minutes, at most 30 runs
+
+def queued_count_lines(root: str, system: str) -> list:
+    """Bash function `scope_gui_queued`: prints how many jobs of `system` are in the scheduler queue (0 without a scheduler, -1 when the
+    queue cannot be read). It reads the queue with the same lines as the Runs page (_QUEUE_LINES: Slurm, SGE) and counts, like
+    jobs_by_system, the jobs that run in <project>/Computations/<system>/ (as written or with links resolved), or, when the scheduler gives
+    no folder, the jobs whose name is the system's or starts with '<system>_'."""
+    body = "\n".join("    " + l for l in _QUEUE_LINES)
+    return ["scope_gui_queued() {", f"  ROOT={root}; S={shlex.quote(system)}; n=0",
+            "  out=$( {", body, "  } 2>/dev/null ) || true",
+            f'  kind=$(printf "%s\\n" "$out" | sed -n "s/^{QUEUELINE} //p" | head -n 1)',
+            '  case "$kind" in slurm|sge) ;; none) echo 0; return 0;; *) echo -1; return 0;; esac',
+            f'  RR=$(printf "%s\\n" "$out" | sed -n "s/^{REALROOT} //p" | head -n 1)',
+            "  while IFS= read -r line; do",
+            f'    case "$line" in "{JOBLINE} "*) ;; *) continue;; esac',
+            f'    rest=${{line#{JOBLINE} }}; name=$(printf "%s" "$rest" | cut -d"|" -f3); wd=$(printf "%s" "$rest" | cut -d"|" -f4); rd=$(printf "%s" "$rest" | cut -d"|" -f5); hit=0',
+            '    for d in "$wd" "$rd"; do [ -n "$d" ] || continue; for r in "$ROOT" "$RR"; do [ -n "$r" ] || continue',
+            '      case "$d/" in "$r/Computations/$S/"*) hit=1;; esac; done; done',
+            '    if [ "$hit" = 0 ] && [ -z "$wd$rd" ]; then case "$name" in "$S"|"$S"_*) hit=1;; esac; fi',
+            '    if [ "$hit" = 1 ]; then n=$((n+1)); fi',
+            "  done <<SCOPE_GUI_QUEUE_EOF", "$out", "SCOPE_GUI_QUEUE_EOF", '  echo "$n"', "}"]
+
+def run_script_text(p: Profile, system: str, remote_inputs: list, quiet: bool=False, verbose: bool=False, errors: bool=False, set_path: bool=True,
+                    keep_going: bool=False, poll: int=KEEP_GOING_POLL, rounds: int=KEEP_GOING_ROUNDS) -> str:
+    """The script for `scope run` on the cluster. It first runs `scope set_path` from the project folder, so the paths inside the uploaded system point to the cluster folders.
+
+    keep_going: one `scope run` submits only the jobs that are ready and ends; a job that waits for another (freq after opt) is submitted
+    by a later run. With keep_going the script stays: after each `scope run` it counts this system's jobs in the queue; none left means
+    done (that run has read the last outputs); otherwise it looks again every `poll` seconds and, once they have all left the queue, runs
+    `scope run` again. It stops when `scope run` fails, when the queue cannot be read, or after `rounds` runs. Stop ends it at any point."""
     scope = scope_program(p); root = shell_path(p.remote_root.rstrip("/")); env = shell_path(p.remote_env); s = shlex.quote(system)
     flags = " ".join(f for f, on in (("-q", quiet), ("-v", verbose), ("-e", errors)) if on)
     lines = ["set -e", "export TERM=dumb PYTHONUNBUFFERED=1", *activation_lines(p), f"cd {root}"]
     if set_path: lines.append(f"{scope} set_path -n {env} -s {s}")
-    lines.append(f"{scope} run -n {env} -s {s} -i " + " ".join(shell_path(i) for i in remote_inputs) + (f" {flags}" if flags else ""))
+    run = f"{scope} run -n {env} -s {s} -i " + " ".join(shell_path(i) for i in remote_inputs) + (f" {flags}" if flags else "")
+    if not keep_going: return "\n".join(lines + [run]) + "\n"
+    minutes = f"{poll // 60} minute(s)" if poll >= 60 else f"{poll} s"
+    lines += queued_count_lines(root, system) + [
+        "ROUND=1", "while :; do",
+        f'  echo "{KEEP_GOING} run $ROUND ($(date "+%Y-%m-%d %H:%M")): scope run"', f"  {run}", "  N=$(scope_gui_queued)",
+        f'  if [ "$N" = 0 ]; then echo "{KEEP_GOING} no job of this system is left in the queue: done after $ROUND run(s)."; break; fi',
+        f'  if [ "$N" -lt 0 ]; then echo "{KEEP_GOING} the scheduler queue cannot be read here, so the end of the jobs cannot be seen: stopping. Press Run again when they have finished."; break; fi',
+        f'  if [ "$ROUND" -ge {int(rounds)} ]; then echo "{KEEP_GOING} {int(rounds)} runs reached: stopping ($N job(s) still in the queue). Press Run again to go on."; break; fi',
+        f'  echo "{KEEP_GOING} $N job(s) of this system in the queue: looking again every {minutes} (Stop ends the wait)."',
+        f"  while :; do sleep {int(poll)}; N=$(scope_gui_queued); if [ \"$N\" -le 0 ]; then break; fi; done",
+        f'  if [ "$N" -lt 0 ]; then echo "{KEEP_GOING} the scheduler queue cannot be read any more: stopping. Press Run again when the jobs have finished."; break; fi',
+        "  ROUND=$((ROUND+1))", "done"]
     return "\n".join(lines) + "\n"
 
 
@@ -714,6 +754,7 @@ def run_script_text(p: Profile, system: str, remote_inputs: list, quiet: bool=Fa
 ############################################
 STARTED, BUSY, SIZE, ALIVE, BEGIN, RUNLINE = "__SCOPE_GUI_STARTED__", "__SCOPE_GUI_BUSY__", "__SCOPE_GUI_SIZE__", "__SCOPE_GUI_ALIVE__", "__SCOPE_GUI_BEGIN__", "__SCOPE_GUI_RUN__"
 MISSING = "__SCOPE_GUI_MISSING__"
+KEEP_GOING = "Keep going:"                                                     ## lines of a keep-going run in its log
 EXIT_MARKER_REMOTE = backend.EXIT_MARKER
 
 def pid_name(system: str) -> str:
@@ -729,7 +770,8 @@ def _common(p: Profile, system: str="") -> list:
     if system: lines += [f"N={pid_name(system)}", 'PIDF="$ROOT"/logs/run_"$N".pid', 'LOCK="$ROOT"/logs/run_"$N".lock']
     return lines
 
-def detached_run_script(p: Profile, system: str, remote_inputs: list, quiet: bool=False, verbose: bool=False, errors: bool=False, set_path: bool=True, stamp: str="", check_files: bool=False) -> str:
+def detached_run_script(p: Profile, system: str, remote_inputs: list, quiet: bool=False, verbose: bool=False, errors: bool=False, set_path: bool=True, stamp: str="", check_files: bool=False,
+                        keep_going: bool=False, poll: int=KEEP_GOING_POLL, rounds: int=KEEP_GOING_ROUNDS) -> str:
     """Starts `scope run` on the cluster so that it does not depend on this window or on the SSH connection.
 
     One run per system at a time: the lock is a folder (`mkdir` is atomic, so two starts at the same moment cannot both get it). The run is
@@ -748,7 +790,7 @@ def detached_run_script(p: Profile, system: str, remote_inputs: list, quiet: boo
     import time
     from scope.gui.backend import unique_stamp
     stamp = stamp or unique_stamp()                                         ## date_time_id: two starts in one second never share a log
-    inner = run_script_text(p, system, remote_inputs, quiet, verbose, errors, set_path)
+    inner = run_script_text(p, system, remote_inputs, quiet, verbose, errors, set_path, keep_going, poll, rounds)
     wrapper = 'trap true TERM; bash "$1" > "$2" 2>&1 < /dev/null; echo "' + EXIT_MARKER_REMOTE + ' $?" >> "$2"; rm -rf "$3" "$4"'      ## TERM: let the run end, then still write the marker and free the lock
     check = []
     if check_files:
