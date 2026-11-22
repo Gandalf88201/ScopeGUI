@@ -79,26 +79,20 @@ def get_attempt_number(comp: object, origin: str, debug: int=0) -> int:
 def get_slurm_signal_time(time_limit: int | str | None, debug: int=0) -> int:
     """Returns advance-warning seconds for a SLURM wall-time limit.
 
-    Uses 10% of the limit, between 10 and 60 seconds. Numeric values represent
-    minutes; formatted strings use slurm_time_to_seconds(). None or an
-    unlimited queue uses 60 seconds. SLURM may deliver its warning early.
+    Uses 10% of a finite limit, between 10 and 60 seconds. Accepts minutes or
+    a Slurm duration string. An unavailable, unlimited or zero limit uses 60 seconds.
     """
-    from scope.parse_general import slurm_time_to_seconds
-    if time_limit is None: return 60
-    if isinstance(time_limit,str) and not time_limit.isdigit():
-        if '-' in time_limit and ':' not in time_limit: time_limit += ':00:00'
-        elif '-' not in time_limit and time_limit.count(':') == 1: time_limit = '0:'+time_limit
-        seconds = slurm_time_to_seconds(time_limit)
-    else:
-        seconds = int(time_limit)*60
-    return min(60,max(10,seconds//10)) if seconds > 0 else 60
+    from scope.classes_queue import _read_queue_time
+    seconds = _read_queue_time(time_limit,'slurm') if isinstance(time_limit,str) else int(time_limit or 0)*60
+    if seconds is None or seconds <= 0: return 60
+    return min(60,max(10,seconds//10))
 
 
 def gen_sge_time_directives(queue: object, debug: int=0) -> tuple[str,str]:
     """Returns SGE wall-time directives and the signal that triggers result copying.
 
-    Uses the Environment's requested time_limit, or the Queue's maximum, in
-    minutes. Omits h_rt when neither limit is available. Older Queues collect
+    Uses the task's time_limit, the queue's finite maximum, or 30 days for an
+    unlimited queue. Omits h_rt when the hard limit is unknown. Older Queues collect
     missing settings when possible; unavailable settings use -notify/USR2.
 
     Without a finite soft limit, -notify requests USR2 before termination; USR1
@@ -108,17 +102,16 @@ def gen_sge_time_directives(queue: object, debug: int=0) -> tuple[str,str]:
     controls the grace period; zero or unavailable intervals cannot guarantee it.
     Assumes SGE's standard warning signals.
     """
-    from scope.classes_queue import _queue_time_to_seconds
+    from scope.classes_queue import _read_queue_time, get_submission_time_limit
     if hasattr(queue,'update_settings'): queue.update_settings(debug=max(debug-1,0))
 
     # 1) Converts the requested and configured wall times from minutes to seconds.
-    time_limit = getattr(queue._environment,'time_limit',None)
-    if time_limit is None: time_limit = getattr(queue,'time_limit',None)
+    time_limit = get_submission_time_limit(queue)
     soft_limit = getattr(queue,'soft_time_limit',None)
     notify     = getattr(queue,'notify_time',None)
-    if isinstance(time_limit,str): time_limit = _queue_time_to_seconds(time_limit,'slurm')
+    if isinstance(time_limit,str): time_limit = _read_queue_time(time_limit,'slurm')
     elif time_limit is not None:   time_limit = int(time_limit*60)
-    if isinstance(soft_limit,str): soft_limit = _queue_time_to_seconds(soft_limit,'slurm')
+    if isinstance(soft_limit,str): soft_limit = _read_queue_time(soft_limit,'slurm')
     elif soft_limit is not None:   soft_limit = int(soft_limit*60)
 
     # 2) Selects the appropriate SGE warning without confusing it with suspension.

@@ -287,7 +287,8 @@ def fill_environment_data(data: object, debug: int=0):
     """Adds resource defaults and normalizes a parsed 'none' time limit.
 
     Expects data accepted by check_environment_data(); returns the same object.
-    time_limit is in integer minutes; None uses the selected queue's limit.
+    time_limit is in integer minutes. None uses the selected queue's maximum.
+    Unlimited queues use their configured default when available, otherwise 30 days.
     """
     ## Adds defaults to environment data
     if not hasattr(data,"requested_procs"):   data._add_attr("requested_procs",int(1)) 
