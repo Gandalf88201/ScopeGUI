@@ -291,6 +291,9 @@ def run_task(sys_path: str, inp_paths: list, global_env: str | object, handle_er
                             print(f"RUN_TASK, step 5.2: maximum steps reached without convergence")
                             report += f"Repetitive optimization exhausted {this_job.job_data.max_steps} steps without convergence: {comp.out_path}. Check energy, forces and QE optimization status.\n"
 
+                    if worked and this_job.job_setup == 'find_minimum':
+                        report += this_job.continue_minimum_search(comp, debug=debug)
+
                     if len(this_job.computations) > ncomputations: sys.should_save = True
 
                     ## 5.3 Keep error handling after continuation creation so superseded outputs stay intact.

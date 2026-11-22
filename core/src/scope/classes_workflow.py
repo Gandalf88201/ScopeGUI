@@ -662,107 +662,21 @@ class Job(object):
             new_comp.set_paths()
 
         #####################
-        ## 2- Setup to find a minimum by displacing imaginary modes and repeating optimization/frequencies
+        ## 2- Starts a minimum search by displacing the initial State along its imaginary modes
         #####################
         elif self.job_setup == 'find_minimum':
-            from scope.vnm_tools import displace_neg_freqs
-
-            branch = self._workflow._branch
-            if branch.read_status() == 'terminated': return ''
+            if self.computations or self._workflow._branch.read_status() == 'terminated': return ''
             if not self.check_requisites(debug=max(debug-1,0)): return ''
-            frequency_job  = None
+            found, state = self.source.find_state(self.istate)
+            if not found: return ''
+
+            # Uses the last successful frequency calculation on the initial State, if available.
             frequency_comp = None
-            step           = 1
-
-            # 1) For later cycles, waits for the current optimization and frequency Jobs
-            if self.computations:
-                if any(comp.keyword != '' for comp in self.computations): raise ValueError("SET_FIND_MINIMUM: Computation keywords must be empty")
-                current = max(self.computations, key=lambda comp: (comp.step, comp.run_number))
-                self.register(debug=max(debug-1,0))
-                if not self.isgood or not self.isfinished or current.has_update: return ''
-                candidates = [job for job in self._workflow.jobs if job.type == 'freq' and self.name in job.requisites and job.istate == self.fstate and job.fstate == self.fstate]
-                if not candidates: return ''
-                if len(candidates) != 1: raise ValueError("SET_FIND_MINIMUM: Requires a single dependent frequency Job using the optimization's final State")
-                frequency_job = candidates[0]
-                if not frequency_job.computations: return ''
-                if any(comp.keyword != '' for comp in frequency_job.computations): raise ValueError("SET_FIND_MINIMUM: Frequency computation keywords must be empty")
-                frequency_job.register(debug=max(debug-1,0))
-                frequency_comp = max(frequency_job.computations, key=lambda comp: (comp.step, comp.run_number))
-                if not frequency_job.isgood or not frequency_job.isfinished or frequency_comp.has_update or frequency_comp.step != current.step: return ''
-                step = current.step + 1
-
-            # 2) For the initial cycle, locates the State and its latest frequency calculation
-            found, initial_state = self.source.find_state(self.istate if step == 1 else self.fstate)
-            if not found or not hasattr(initial_state,'coord') or not getattr(initial_state,'VNMs',None):
-                if debug > 0: print(f"SET_FIND_MINIMUM: {self.name} --> waiting for geometry and frequencies")
-                return ''
-            if step == 1:
-                candidates = [comp for comp in initial_state.computations if comp.type == 'freq' and comp.isregistered and getattr(comp,'isgood',False) and getattr(comp,'isfinished',False)]
-                for comp in reversed(candidates):
-                    comp.check_updates()
-                    if not comp.has_update:
-                        frequency_comp = comp
-                        break
-            labels = initial_state.labels
-            coord  = initial_state.coord
-            vnms   = initial_state.VNMs
-
-            # 3) Reads eigenvectors from the selected frequency output, retaining the State geometry
-            if frequency_comp is not None:
-                frequency_comp.check_files()
-                if not frequency_comp.input_exists or not frequency_comp.output_exists: return ''
-                frequency_comp.read_lines()
-                frequency_comp.create_output(debug=max(debug-1,0))
-                try:
-                    vnms = frequency_comp.output.get_vnms(witheigen=True, debug=max(debug-1,0))
-                finally:
-                    frequency_comp.delete_output()
-                    frequency_comp.delete_lines()
-            if not vnms or any(not np.isfinite(vnm.freq_cm) for vnm in vnms): raise ValueError("SET_FIND_MINIMUM: Valid frequencies are required")
-            negative = [vnm for vnm in vnms if vnm.freq_cm < 0]
-            if not negative:
-                if debug > 0: print(f"SET_FIND_MINIMUM: {self.source.name}/{self.name} --> no negative frequencies")
-                return ''
-            max_steps = getattr(self.job_data,'max_steps',5)
-            if step > max_steps:
-                return f"Minimum search exhausted {max_steps} cycles with {len(negative)} negative frequencies: {frequency_comp.out_path if frequency_comp is not None else self.name} --> Review the geometry and optimization settings.\n"
-            if labels is None or coord is None or np.shape(coord) != (len(labels),3): raise ValueError("SET_FIND_MINIMUM: State geometry is unavailable")
-            for vnm in negative:
-                if not getattr(vnm,'has_mode',False) or list(vnm.labels) != list(labels): raise ValueError("SET_FIND_MINIMUM: Imaginary-mode vectors must match the State atom order")
-                if list(vnm.atomidxs) not in [list(range(len(labels))),list(range(1,len(labels)+1))]: raise ValueError("SET_FIND_MINIMUM: Mode atoms must follow the geometry's atom order")
-            displaced_coord = displace_neg_freqs(coord, vnms, debug=max(debug-1,0))
-
-            # 4) Adds a distinct displaced State and optimization step through the usual APIs
-            displaced_name = f'displaced_{branch.name}_{self.name}_s{step}'
-            found, displaced = self.source.find_state(displaced_name)
-            if found: raise ValueError(f"SET_FIND_MINIMUM: State {displaced_name!r} exists without its computation")
-            displaced = self.source.add_state(displaced_name)
-            displaced.set_geometry(labels, displaced_coord, debug=max(debug-1,0))
-            if hasattr(initial_state,'cell_vector'): displaced.set_cell(initial_state.cell_vector)
-            new_qc = deepcopy(qc_data)
-            new_qc._mod_attr('istate',displaced_name)
-            new_qc._mod_attr('fstate',self.fstate)
-            new_comp = self.add_computation(new_qc, step=step, debug=max(debug-1,0))
-            new_comp.origin = 'find_minimum'
-            new_comp.set_name()
-            new_comp.set_paths()
-
-            # 5) Adds the matching frequency step; its optimization prerequisite delays submission
-            if frequency_job is not None:
-                new_qc = deepcopy(frequency_comp.qc_data)
-                new_comp = frequency_job.add_computation(new_qc, step=step, debug=max(debug-1,0))
-                new_comp.origin = 'find_minimum'
-                new_comp.set_name()
-                new_comp.set_paths()
-                frequency_job.register(debug=max(debug-1,0))
-            self.register(debug=max(debug-1,0))
-            self._workflow.register(debug=max(debug-1,0))
-            branch.register(debug=max(debug-1,0))
-            branch.clear_status()
-            branch.set_status('active')
-            branch._system.should_save = True
-            if debug > 0: print(f"SET_FIND_MINIMUM: {self.source.name}/{self.name} --> prepared cycle {step}/{max_steps} for {len(negative)} negative frequencies")
-            return ''
+            for comp in reversed(state.computations):
+                if comp.type == 'freq' and comp.isregistered and getattr(comp,'isgood',False) and getattr(comp,'isfinished',False) and not comp.check_updates():
+                    frequency_comp = comp
+                    break
+            return self._add_minimum_search_step(state, qc_data, 1, frequency_comp, debug=debug)
         
         #####################
         ## 3- Setup for finite Differences
@@ -839,6 +753,113 @@ class Job(object):
 ###############################
 ## Continuation Computations ##
 ###############################
+    def continue_minimum_search(self, comp: object, debug: int=0) -> str:
+        """Evaluates the matching frequency result after a completed minimum-search optimization.
+
+        Only the latest optimization run of the latest step can advance the search.
+        A finished frequency Job on the same State and step supplies the modes.
+        Returns the cycle-limit report or an empty string.
+        """
+        if self.job_setup != 'find_minimum' or not self.computations or not comp.isregistered: return ''
+        if comp is not max(self.computations, key=lambda item: (item.step, item.run_number)): return ''
+        if self._workflow._branch.read_status() == 'terminated': return ''
+        if any(item.keyword != '' for item in self.computations): raise ValueError("SET_FIND_MINIMUM: Computation keywords must be empty")
+        self.register(debug=max(debug-1,0))
+        if not self.isgood or not self.isfinished or comp.has_update: return ''
+
+        # Finds the frequency Job that uses this optimization's final State.
+        candidates = [job for job in self._workflow.jobs if job.type == 'freq' and self.name in job.requisites and job.istate == self.fstate == job.fstate]
+        if not candidates: return ''
+        if len(candidates) != 1: raise ValueError("SET_FIND_MINIMUM: Requires a single dependent frequency Job using the optimization's final State")
+        frequency_job = candidates[0]
+        if not frequency_job.computations: return ''
+        if any(item.keyword != '' for item in frequency_job.computations): raise ValueError("SET_FIND_MINIMUM: Frequency computation keywords must be empty")
+        frequency_comp = max(frequency_job.computations, key=lambda item: (item.step, item.run_number))
+        if frequency_comp.step != comp.step: return ''
+        frequency_job.register(debug=max(debug-1,0))
+        if not frequency_job.isgood or not frequency_job.isfinished or frequency_comp.has_update: return ''
+
+        # Takes optimization settings from the earliest available run of this step.
+        first_run = min((item for item in self.computations if item.step == comp.step), key=lambda item: item.run_number)
+        found, state = self.source.find_state(self.fstate)
+        if not found: return ''
+        return self._add_minimum_search_step(state, first_run.qc_data, comp.step+1, frequency_comp, debug=debug)
+
+    def _add_minimum_search_step(self, state: object, qc_data: object, step: int, frequency_comp: object=None, debug: int=0) -> str:
+        """Adds a correction step by displacing the State along its imaginary modes.
+
+        Reads mode vectors from the supplied frequency output when available.
+        Later steps also create the matching frequency computation. Returns a
+        report when imaginary modes remain at the cycle limit, or an empty string.
+        """
+        from scope.vnm_tools import displace_neg_freqs
+
+        branch = self._workflow._branch
+        if not hasattr(state,'coord') or not getattr(state,'VNMs',None):
+            if debug > 0: print(f"SET_FIND_MINIMUM: {self.name} --> waiting for geometry and frequencies")
+            return ''
+        labels = state.labels
+        coord  = state.coord
+        vnms   = state.VNMs
+
+        # Reads eigenvectors from the selected frequency output, retaining the State geometry
+        if frequency_comp is not None:
+            frequency_comp.check_files()
+            if not frequency_comp.input_exists or not frequency_comp.output_exists: return ''
+            frequency_comp.read_lines()
+            try:
+                frequency_comp.create_output(debug=max(debug-1,0))
+                vnms = frequency_comp.output.get_vnms(witheigen=True, debug=max(debug-1,0))
+            finally:
+                frequency_comp.delete_output()
+                frequency_comp.delete_lines()
+        if not vnms or any(not np.isfinite(vnm.freq_cm) for vnm in vnms): raise ValueError("SET_FIND_MINIMUM: Valid frequencies are required")
+        negative = [vnm for vnm in vnms if vnm.freq_cm < 0]
+        if not negative:
+            if debug > 0: print(f"SET_FIND_MINIMUM: {self.source.name}/{self.name} --> no negative frequencies")
+            return ''
+        max_steps = getattr(self.job_data,'max_steps',5)
+        if step > max_steps:
+            return f"Minimum search exhausted {max_steps} cycles with {len(negative)} negative frequencies: {frequency_comp.out_path if frequency_comp is not None else self.name} --> Review the geometry and optimization settings.\n"
+        if labels is None or coord is None or np.shape(coord) != (len(labels),3): raise ValueError("SET_FIND_MINIMUM: State geometry is unavailable")
+        for vnm in negative:
+            if not getattr(vnm,'has_mode',False) or list(vnm.labels) != list(labels): raise ValueError("SET_FIND_MINIMUM: Imaginary-mode vectors must match the State atom order")
+            if list(vnm.atomidxs) not in [list(range(len(labels))),list(range(1,len(labels)+1))]: raise ValueError("SET_FIND_MINIMUM: Mode atoms must follow the geometry's atom order")
+        displaced_coord = displace_neg_freqs(coord, vnms, debug=max(debug-1,0))
+
+        # Creates the displaced State and its optimization.
+        displaced_name = f'displaced_{branch.name}_{self.name}_s{step}'
+        found, displaced = self.source.find_state(displaced_name)
+        if found: raise ValueError(f"SET_FIND_MINIMUM: State {displaced_name!r} exists without its computation")
+        displaced = self.source.add_state(displaced_name)
+        displaced.set_geometry(labels, displaced_coord, debug=max(debug-1,0))
+        if hasattr(state,'cell_vector'): displaced.set_cell(state.cell_vector)
+        new_qc = deepcopy(qc_data)
+        new_qc._mod_attr('istate',displaced_name)
+        new_qc._mod_attr('fstate',self.fstate)
+        new_comp = self.add_computation(new_qc, step=step, debug=max(debug-1,0))
+        new_comp.origin = 'find_minimum'
+        new_comp.set_name()
+        new_comp.set_paths()
+
+        # The first frequency step comes from its own task. Later cycles keep both Jobs at the same step.
+        self.register(debug=max(debug-1,0))
+        if step > 1:
+            frequency_job = frequency_comp._job
+            new_qc = deepcopy(frequency_comp.qc_data)
+            new_comp = frequency_job.add_computation(new_qc, step=step, debug=max(debug-1,0))
+            new_comp.origin = 'find_minimum'
+            new_comp.set_name()
+            new_comp.set_paths()
+            frequency_job.register(debug=max(debug-1,0))
+        self._workflow.register(debug=max(debug-1,0))
+        branch.register(debug=max(debug-1,0))
+        branch.clear_status()
+        branch.set_status('active')
+        branch._system.should_save = True
+        if debug > 0: print(f"SET_FIND_MINIMUM: {self.source.name}/{self.name} --> prepared cycle {step}/{max_steps} for {len(negative)} negative frequencies")
+        return ''
+
     def set_continuation_computation(self, comp: object, typ: str, debug: int=0):
         if debug > 1: print("Set_Continuation_Comp: Creating new computation to continue job. Type:", typ, "Path:", comp.path)
     

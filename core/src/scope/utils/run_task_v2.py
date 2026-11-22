@@ -197,7 +197,7 @@ def handle_pending_computation(comp: object, environment: object, options: objec
 
 
 def handle_continuation(comp: object, environment: object, options: object, registration_worked: bool, handle_errors: bool=False, debug: int=0) -> str:
-    """Coordinates recovery, repeated optimization and failed-output handling.
+    """Evaluates recovery, optimization continuations and failed-output handling.
 
     Selects SCF recovery when comp.status is no_scf_convergence. Other recovery
     functions check whether they apply and supply their own reports.
@@ -227,8 +227,10 @@ def handle_continuation(comp: object, environment: object, options: object, regi
         continuation_stopped = new_comp is None
     # 2) Optimization recovery
     report += recover_optimization(comp, debug=max(debug-1,0))
-    # 3) Repetitive optimization
+    # 3) Repetitive optimization and minimum searches
     report += continue_rep_opt(comp, registration_worked, debug=max(debug-1,0))
+    if registration_worked and comp._job.job_setup == 'find_minimum':
+        report += comp._job.continue_minimum_search(comp, debug=max(debug-1,0))
     # 4) Failed-output handling
     report += handle_failed_output(comp, environment, options, handle_errors=handle_errors, continuation_stopped=continuation_stopped, registration_worked=registration_worked, debug=max(debug-1,0))
     return report
