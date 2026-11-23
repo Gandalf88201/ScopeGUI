@@ -331,9 +331,15 @@ class PipelineTab(QWidget):
     def start_dir(self) -> str:
         return os.path.dirname(self.session.info.filepath) if self.session.info else os.path.expanduser("~")
 
+    def known_queues(self) -> list:
+        """The queues of the local environment and of the cluster's environment (known after Test connection on the Cluster page)."""
+        local  = list(self.session.info.queues) if self.session.info else []
+        remote = getattr(self.window(), "remote_tab", None)
+        return list(dict.fromkeys(local + list(((getattr(remote, "probe", None) or {}).get("env") or {}).get("queues") or [])))
+
     def new_input(self) -> None:
         from scope.gui.editor import InputEditor
-        dialog = InputEditor(self, self.start_dir(), reports=self.session.reports)
+        dialog = InputEditor(self, self.start_dir(), reports=self.session.reports, queues=self.known_queues())
         if dialog.exec() and dialog.saved_path: self.session.add_inputs([dialog.saved_path])
 
     def report_of(self, node: str) -> "backend.InputReport":
@@ -390,7 +396,7 @@ class PipelineTab(QWidget):
         from scope.gui.editor import InputEditor
         try: form, extras = backend.followup_form(report, self.session.reports)
         except OSError as exc: QMessageBox.warning(self, "Cannot read file", str(exc)); return
-        dialog = InputEditor(self, os.path.dirname(report.path), form, extras, reports=self.session.reports, after=report.job)
+        dialog = InputEditor(self, os.path.dirname(report.path), form, extras, reports=self.session.reports, after=report.job, queues=self.known_queues())
         if dialog.exec() and dialog.saved_path: self.session.add_inputs([dialog.saved_path])
 
     def edit_selected(self) -> None:
@@ -403,7 +409,7 @@ class PipelineTab(QWidget):
         try:
             with open(path) as f: form, extras = backend.sections_to_form(backend.parse_sections(f.read()))
         except OSError as exc: QMessageBox.warning(self, "Cannot read file", str(exc)); return
-        dialog = InputEditor(self, os.path.dirname(path), form, extras, os.path.basename(path), reports=[r for r in self.session.reports if r.path != path])
+        dialog = InputEditor(self, os.path.dirname(path), form, extras, os.path.basename(path), reports=[r for r in self.session.reports if r.path != path], queues=self.known_queues())
         if dialog.exec() and dialog.saved_path: self.session.add_inputs([dialog.saved_path])
 
     def add(self) -> None:

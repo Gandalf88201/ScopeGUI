@@ -139,8 +139,8 @@ def test_followup_form_copies_the_method_and_waits_for_the_job(tmp_path):
     opt = read(tmp_path, "opt.scope", job(branch="sco", workflow="'hs*'").replace("   requested_procs = 4\n", "   requested_procs = 8\n   queue = 'short'\n").replace("&qc_data\n", "&qc_data\n   is_grimme = True\n").replace("   hierarchy = 1\n", "   hierarchy = 1\n   job_setup = 'rep_opt'\n"))
     form, extras = backend.followup_form(opt, [opt])
     assert (form["branch"], form["workflow"], form["requisites"], form["job"], form["comp_type"]) == ("sco", "hs*", "opt", "freq", "freq")
-    assert (form["functional"], form["basis"], form["procs"], form["queue"]) == ("b3lyp", "6-31g*", 8, "short") and "is_grimme" in extras["qc_data"]
-    assert extras["job_data"] == "" and form["istate"] == form["fstate"] == ""                    # job_setup belongs to the opt job only; states follow the requisite
+    assert (form["functional"], form["basis"], form["procs"], form["queue"]) == ("b3lyp", "6-31g*", 8, "short") and form["settings"]["qc_data"]["is_grimme"] == "True"
+    assert extras["job_data"] == "" and form["settings"]["job_data"] == {} and form["istate"] == form["fstate"] == ""   # job_setup belongs to the opt job only; states follow the requisite
     freq = read(tmp_path, "freq.scope", job(branch="sco", name="freq", comp_type="freq"))
     assert backend.followup_form(opt, [opt, freq])[0]["job"] == "freq2"                           # never a name the branch already has
 

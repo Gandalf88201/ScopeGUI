@@ -4,6 +4,9 @@ from scope.classes_environment import Environment
 from scope.read_write import load_binary, clear_screen
 from scope.utils.run_task import run_task
 
+## Exit code of `scope run` when the scheduler refused at least one job (2 is argparse's code for bad arguments, 1 an uncaught error).
+EXIT_SUBMISSION_FAILED = 4
+
 def path_exists(path):
     if not os.path.exists(path):
         raise ValueError(f'Path {path} does not exist!')
@@ -29,6 +32,7 @@ def run_parser(subparsers):
     parser.set_defaults(func=run)
 
 def run(args):
+    """Runs the task; returns EXIT_SUBMISSION_FAILED when the scheduler refused a job, else 0."""
     clear_screen()
     
     ###############################
@@ -50,15 +54,20 @@ def run(args):
 
     summary = ""
     report = run_task(sys_path, args.inp_path, env, handle_errors=args.errors, debug=debug)
-    if type(report) == str: summary += report
+    if isinstance(report, str): summary += report
+    failures = getattr(report, "submission_failures", [])
 
     print("")
-    print("#################################") 
+    print("#################################")
     print("### MANUAL ATTENTION REQUIRED ###")
     print("#################################")
     if len(summary) > 0: print(summary)
     else:                print("No manual action required")
     print("#################################")
+    if failures:
+        print(f"SCOPE RUN: the scheduler refused {len(failures)} job(s); exiting with code {EXIT_SUBMISSION_FAILED}.")
+        return EXIT_SUBMISSION_FAILED
+    return 0
 
 if __name__ == "__main__":
     run()

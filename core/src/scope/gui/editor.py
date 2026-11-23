@@ -6,7 +6,9 @@ from scope.gui import backend, theme
 from scope.gui.theme import set_kind
 
 DEFAULTS = {"branch": "demo", "workflow": "*", "job": "opt", "requisites": "", "constrains": "self", "software": "g16", "comp_type": "opt", "functional": "b3lyp", "basis": "6-31g*", "procs": 4, "want_submit": False, "queue": "",
-            "istate": "", "fstate": ""}
+            "istate": "", "fstate": "", "settings": {}}
+CLUSTER_NOTE = ("These are SCOPE's own settings. What depends on the cluster: the queue names, the time limit (at most the queue's) and "
+                "the processors per job (at most a node's cores); max. jobs and processors should stay within your allocation.")
 
 class LinkDialog(QDialog):
     """Shows what linking job A before job B changes in B's input file (backend.link_jobs), line by line, before anything is written."""
@@ -65,7 +67,7 @@ class InputEditor(QDialog):
     Attributes:
         saved_path (str):    Path of the file written, or '' if the dialog was cancelled.
     """
-    def __init__(self, parent: QWidget=None, start_dir: str="", form: dict=None, extras: dict=None, filename: str="", reports: list=None, after: str=""):
+    def __init__(self, parent: QWidget=None, start_dir: str="", form: dict=None, extras: dict=None, filename: str="", reports: list=None, after: str="", queues: "list | None"=None):
         super().__init__(parent)
         self.setWindowTitle("Scope input file"); theme.fit(self, 1000, 680)
         self.start_dir, self.saved_path, self.text = start_dir or os.path.expanduser("~"), "", ""
@@ -83,7 +85,10 @@ class InputEditor(QDialog):
         self.fstate.setToolTip("The State this job writes its results into. A geometry job (opt, ts) usually writes a new state named after the job. A freq, scf or td job usually writes into the state it read, so its frequencies and energy sit on that geometry.")
         self.states_note = QLabel(); self.states_note.setWordWrap(True); self.states_note.setObjectName("pagesub")
         self.software, self.comp_type                    = QComboBox(), QComboBox()
-        self.functional, self.basis, self.queue          = QLineEdit(values["functional"]), QLineEdit(values["basis"]), QLineEdit(values["queue"])
+        self.functional, self.basis                      = QLineEdit(values["functional"]), QLineEdit(values["basis"])
+        self.queue = QComboBox(); self.queue.setEditable(True)            ## the queues SCOPE knows for this cluster, or any name typed
+        self.queue.addItems([q for q in dict.fromkeys(queues or []) if q]); self.queue.setCurrentText(values["queue"])
+        self.queue.lineEdit().setPlaceholderText("empty = SCOPE chooses among the environment's queues" if queues else "e.g. std (Test connection lists the cluster's queues)")
         self.procs, self.submit                          = QSpinBox(), QCheckBox("Submit jobs to the scheduler (want_submit)")
         self.procs.setRange(1, 4096); self.procs.setValue(int(values["procs"])); self.submit.setChecked(bool(values["want_submit"]))
         self.software.addItems(list(backend.SOFTWARE_TYPES)); self.software.setCurrentText(values["software"])
@@ -94,7 +99,8 @@ class InputEditor(QDialog):
                                    "Requisites only decide WHEN the job starts. Which geometry it uses is the Initial state.")
         self.requisites.setPlaceholderText("empty = starts right away; e.g. opt")
         self.constrains.setToolTip("Jobs that block this one once they are finished. 'self' prevents running the same job twice.")
-        self.queue.setToolTip("Optional. On a cluster it must match a queue of the environment exactly.")
+        self.queue.setToolTip("Optional; depends on the cluster. It must match a queue of the environment exactly (the list shows the queues known from "
+                              "the environment or the last Test connection); several can be separated by commas. Empty: SCOPE chooses.")
         self.submit.setToolTip("Unchecked is written as want_submit = False. SCOPE assumes True when the line is missing.")
         form = QFormLayout()
         for label, widget in (("Branch", self.branch), ("Workflow (sources)", self.workflow), ("Job name", self.job), ("Requisites (when)", self.requisites), ("Initial state (istate)", self.istate), ("Final state (fstate)", self.fstate)): form.addRow(label, widget)
@@ -102,19 +108,34 @@ class InputEditor(QDialog):
         for label, widget in (("Constrains", self.constrains), ("Software", self.software), ("Computation type", self.comp_type), ("Functional", self.functional)): form.addRow(label, widget)
         form.addRow("Basis set (Gaussian)", self.basis); form.addRow("Processors", self.procs); form.addRow("Queue (optional)", self.queue); form.addRow("", self.submit)
         self.extras = {name: QPlainTextEdit() for name in backend.SECTIONS}
-        tabs = QTabWidget()
+        self.options, self.option_forms = {}, {}                  ## (section, key) -> field; section -> its QFormLayout
+        self.details = QCheckBox("Show solver details"); self.details.setToolTip("Convergence and mixing settings of Quantum ESPRESSO that rarely need changing.")
+        self.tabs = tabs = QTabWidget(); self.tab_index = {}
+        given = (values.get("settings") or {})
         for name in ("qc_data", "job_data", "options", "environment"):
-            self.extras[name].setPlainText((extras or {}).get(name, "")); self.extras[name].setPlaceholderText("key = value, one per line"); self.extras[name].setMaximumHeight(110)
-            tabs.addTab(self.extras[name], f"&&{name}")           ## '&&' is a literal ampersand in a Qt label ('&' alone makes the next letter a shortcut)
+            page, page_lay, fields = QWidget(), QVBoxLayout(), QFormLayout(); page.setLayout(page_lay); page_lay.setContentsMargins(6, 6, 6, 6)
+            if name == "environment":
+                where = QLabel(CLUSTER_NOTE); where.setWordWrap(True); where.setObjectName("pagesub"); page_lay.addWidget(where)
+            if name == "qc_data": page_lay.addWidget(self.details)
+            for o in (o for o in backend.OPTIONS if o.section == name):
+                w = self.option_field(o, str(given.get(name, {}).get(o.key, "")).strip())
+                w.setToolTip(f"{o.key}: {o.help}\nEmpty or 'SCOPE default': the key is not written and SCOPE uses {o.shown}.")
+                self.options[(name, o.key)] = w; fields.addRow(f"{o.label} ({o.key})", w)
+            self.option_forms[name] = fields; page_lay.addLayout(fields)
+            other = QLabel("Other keys of this section, key = value, one per line:"); other.setObjectName("pagesub"); page_lay.addWidget(other)
+            self.extras[name].setPlainText((extras or {}).get(name, "")); self.extras[name].setPlaceholderText("key = value, one per line"); self.extras[name].setMaximumHeight(90)
+            page_lay.addWidget(self.extras[name])
+            self.tab_index[name] = tabs.addTab(page, f"&&{name}")           ## '&&' is a literal ampersand in a Qt label ('&' alone makes the next letter a shortcut)
         mono = QFont("Menlo"); mono.setStyleHint(QFont.Monospace)
         self.preview = QPlainTextEdit(); self.preview.setReadOnly(True); self.preview.setFont(mono)
         self.status  = QLabel(); self.status.setWordWrap(True)
         self.save_btn, cancel = QPushButton("Save…"), QPushButton("Cancel")
         self.save_btn.clicked.connect(self.save); cancel.clicked.connect(self.reject)
-        note = QLabel("Other settings go in the tabs (for instance pseudo, mix_beta or save_wf). Comments of an existing file are not kept.")
-        note.setWordWrap(True)
+        note = QLabel("Each tab lists the settings SCOPE has for that section and that apply to this software and computation type; a setting left on "
+                      "'SCOPE default' is not written. Any other key goes in the box under the fields. Comments of an existing file are not kept.")
+        note.setWordWrap(True); note.setObjectName("pagesub")
         left, right, buttons = QVBoxLayout(), QVBoxLayout(), QHBoxLayout()
-        left.addLayout(form); left.addWidget(QLabel("Other settings")); left.addWidget(tabs); left.addWidget(note); left.addStretch(1)
+        left.addLayout(form); left.addWidget(QLabel("Settings by section")); left.addWidget(tabs); left.addWidget(note); left.addStretch(1)
         right.addWidget(QLabel("File that will be written")); right.addWidget(self.preview, 1); right.addWidget(self.status)
         buttons.addStretch(1); buttons.addWidget(cancel); buttons.addWidget(self.save_btn)
         form_box = QWidget(); form_box.setLayout(left)                    ## the form scrolls on a short screen; preview and Save stay in view
@@ -122,13 +143,59 @@ class InputEditor(QDialog):
         body = QHBoxLayout(); body.addWidget(form_area, 1); body.addLayout(right, 1)
         lay = QVBoxLayout(self); lay.addLayout(body, 1); lay.addLayout(buttons)
         self.filename = filename
-        for w in (self.branch, self.workflow, self.job, self.requisites, self.constrains, self.functional, self.basis, self.queue): w.textChanged.connect(self.refresh)
+        for w in (self.branch, self.workflow, self.job, self.requisites, self.constrains, self.functional, self.basis): w.textChanged.connect(self.refresh)
+        self.queue.currentTextChanged.connect(self.refresh); self.details.toggled.connect(self.refresh); self.tabs.currentChanged.connect(self.fit_tabs)
         for key, w in (("istate", self.istate), ("fstate", self.fstate)):          ## typed by the user: stop following the suggestion BEFORE refreshing
             w.textEdited.connect(lambda _=None, key=key: (self.auto.__setitem__(key, False), self.refresh()))
         for w in self.extras.values(): w.textChanged.connect(self.refresh)
         self.procs.valueChanged.connect(self.refresh); self.submit.toggled.connect(self.refresh); self.comp_type.currentTextChanged.connect(self.refresh)
         self.software.currentTextChanged.connect(self.on_software)
         self.on_software()
+
+    def option_field(self, o: "backend.Option", raw: str) -> QWidget:
+        """A drop-down for a yes/no or a choice setting (first item: SCOPE's default, not written), a text field for a number (empty:
+        SCOPE's default). `raw` is the value as written in the file."""
+        if o.kind in ("bool", "choice"):
+            w = QComboBox(); w.addItem(f"SCOPE default ({o.shown})", "")
+            for v in ((True, False) if o.kind == "bool" else o.choices): w.addItem(str(v), backend.py_value(v))
+            if raw:
+                try: w.setCurrentIndex(max(w.findData(backend.py_value(backend.option_value(o, raw))), 0))
+                except ValueError: pass                                    ## sections_to_form keeps such values in the free box
+            w.currentIndexChanged.connect(self.refresh)
+        else:
+            w = QLineEdit(raw); w.setPlaceholderText(f"SCOPE default: {o.shown}"); w.textChanged.connect(self.refresh)
+        return w
+
+    def settings(self) -> dict:
+        """{section: {key: value as it will be written}} of the option fields that are set (hidden ones included: build_sections drops
+        the options that do not apply)."""
+        out = {name: {} for name in backend.SECTIONS}
+        for (name, key), w in self.options.items():
+            raw = (w.currentData() or "") if isinstance(w, QComboBox) else w.text().strip()
+            if raw: out[name][key] = raw
+        return out
+
+    def show_options(self) -> None:
+        """Shows the option fields that apply to the current software, computation type and settings; solver details only on request
+        (or when set). Tab titles count the settings written in each section."""
+        settings = self.settings()
+        ctx = backend.option_context(self.software.currentText(), self.comp_type.currentText(), settings)
+        any_detail = False
+        for (name, key), w in self.options.items():
+            o = backend.OPTION[(name, key)]; ok = backend.applies(o, ctx)
+            any_detail |= ok and o.detail
+            self.option_forms[name].setRowVisible(w, ok and (not o.detail or self.details.isChecked() or key in settings[name]))
+        self.details.setVisible(any_detail)
+        for name, i in self.tab_index.items():
+            n = sum(1 for k in settings[name] if backend.applies(backend.OPTION[(name, k)], ctx))
+            self.tabs.setTabText(i, f"&&{name}" + (f" ({n})" if n else ""))
+        self.fit_tabs()
+
+    def fit_tabs(self, *args) -> None:
+        """The tabs take the full height of the page shown, so its rows are never squeezed: the form scrolls instead."""
+        page = self.tabs.currentWidget()
+        page.layout().activate()
+        self.tabs.setMinimumHeight(page.sizeHint().height() + self.tabs.tabBar().sizeHint().height() + 6)
 
     def fill_types(self, current: str="") -> None:
         self.comp_type.blockSignals(True); self.comp_type.clear(); self.comp_type.addItems(backend.SOFTWARE_TYPES[self.software.currentText()])
@@ -142,8 +209,8 @@ class InputEditor(QDialog):
 
     def values(self) -> dict:
         return {"branch": self.branch.text(), "workflow": self.workflow.text(), "job": self.job.text(), "requisites": self.requisites.text(), "constrains": self.constrains.text(), "software": self.software.currentText(), "comp_type": self.comp_type.currentText(),
-                "functional": self.functional.text(), "basis": self.basis.text(), "procs": self.procs.value(), "want_submit": self.submit.isChecked(), "queue": self.queue.text(), "extras": {n: w.toPlainText() for n, w in self.extras.items()},
-                "istate": self.istate.text(), "fstate": self.fstate.text()}
+                "functional": self.functional.text(), "basis": self.basis.text(), "procs": self.procs.value(), "want_submit": self.submit.isChecked(), "queue": self.queue.currentText(), "extras": {n: w.toPlainText() for n, w in self.extras.items()},
+                "istate": self.istate.text(), "fstate": self.fstate.text(), "settings": self.settings()}
 
     def suggest_states(self) -> None:
         """Fills the state fields the user has not typed in, from the requisites and the loaded input files."""
@@ -152,6 +219,7 @@ class InputEditor(QDialog):
             self.fstate.blockSignals(True); self.fstate.setText(job); self.fstate.blockSignals(False)       ## still SCOPE's default (the job name): follow the rename
         self.last_job = job
         istate, fstate = backend.suggest_states(self.job.text(), self.comp_type.currentText(), self.requisites.text(), self.reports, self.branch.text(), self.workflow.text())
+        if self.settings()["job_data"].get("job_setup") == "'findiff'" and fstate == istate: fstate = job or "job"     ## SCOPE needs a new state for finite differences
         for key, widget, value in (("istate", self.istate, istate), ("fstate", self.fstate, fstate)):
             if self.auto[key] and widget.text() != value: widget.blockSignals(True); widget.setText(value); widget.blockSignals(False)
         req = backend.split_names(self.requisites.text()); reads = self.istate.text().strip() or "initial"
@@ -165,6 +233,8 @@ class InputEditor(QDialog):
         self.auto = {"istate": True, "fstate": True}; self.refresh()
 
     def refresh(self) -> None:
+        if not hasattr(self, "save_btn"): return                     ## an option field changed while the dialog is being built
+        self.show_options()
         self.suggest_states()
         self.text, report, problems = backend.validate_form(**self.values())
         self.preview.setPlainText(self.text)

@@ -548,9 +548,9 @@ class RemoteTab(QWidget):
         self.begin_watch(p, system, info["log"], f"Run started on the cluster (process {info['pid']}). It keeps going if you close this window or lose the connection.")
 
     def begin_watch(self, p: "remote.Profile", system: str, log: str, note: str="") -> None:
-        self.watching = {"profile": p, "system": system, "log": log, "offset": 0, "polling": False}
+        self.watching = {"profile": p, "system": system, "log": log, "offset": 0, "polling": False, "text": ""}
         if note: self.log.appendPlainText(note + f"\nLog on the cluster: {log}\n")
-        self.run_btn.setEnabled(False); self.unwatch_btn.setEnabled(True); self.stopcl_btn.setEnabled(True); self.status.setText(f"Watching the run on {p.host}…")
+        self.run_btn.setEnabled(False); self.unwatch_btn.setEnabled(True); self.stopcl_btn.setEnabled(True); self.status.setText(f"Watching the run on {p.host}…"); set_kind(self.status, "")
         self.poll_timer.start(self.poll_ms); self.poll()
 
     def poll(self) -> None:
@@ -568,19 +568,37 @@ class RemoteTab(QWidget):
             else: self.status.setText("Cannot reach the cluster right now. The run goes on there; trying again…")
             return
         d = remote.parse_poll(res.raw or res.stdout)
-        if d["text"].strip("\n"): self.log.appendPlainText(d["text"].rstrip("\n")); w["offset"] += d["bytes"]
+        if d["text"].strip("\n"):
+            self.log.appendPlainText(d["text"].rstrip("\n")); w["offset"] += d["bytes"]
+            w["text"] = (w["text"] + d["text"])[-500_000:]                  ## what this run wrote, to read its end (MANUAL ATTENTION, refused jobs)
         if d["exit"] is not None or not d["alive"]:
             self.poll_timer.stop(); self.watching = None; self.unwatch_btn.setEnabled(False); self.stopcl_btn.setEnabled(False); self.run_btn.setEnabled(not self.busy)
+            attention, refused = remote.manual_attention(w["text"]), remote.refused_lines(w["text"])
+            if attention and d["exit"] != 143:                                 ## shown apart, so it is not lost in the log of a long run
+                self.log.appendPlainText("\n==== SCOPE needs your attention ====\n" + attention + "\n====================================")
             if d["exit"] == 143: self.status.setText("The cluster run was stopped. Run again: SCOPE continues where it stopped.")
+            elif d["exit"] is not None and (d["exit"] == remote.EXIT_REFUSED or (d["exit"] != 0 and refused)):
+                first = refused[0] if refused else "see the log"
+                self.status.setText(f"The scheduler refused {'a job' if len(refused) <= 1 else f'{len(refused)} jobs'} ({first}): not submitted. "
+                                    "Check the queue and the time limit of the input, then Run again."); set_kind(self.status, "err")
             elif d["exit"] is not None:
-                self.status.setText(f"Cluster run finished with exit code {d['exit']}.")
-                if d["exit"] == 0: self.session.mark("ran"); self.after_run_ended(w["profile"], w["system"])
+                self.status.setText(f"Cluster run finished with exit code {d['exit']}." + (" See the log." if d["exit"] else ""))
+                if d["exit"]: set_kind(self.status, "err")
+                else: self.session.mark("ran"); self.after_run_ended(w["profile"], w["system"], attention)
             else: self.status.setText("The cluster run ended without finishing (stopped or killed). Run again: SCOPE continues where it stopped.")
 
-    def after_run_ended(self, p: "remote.Profile", system: str) -> None:
+    def after_run_ended(self, p: "remote.Profile", system: str, attention: str="") -> None:
         """A cluster run ended with exit code 0. `scope run` submits its jobs and ends, so look once (read-only) at the scheduler queue
-        before saying the results can be downloaded."""
+        before saying the results can be downloaded. `attention`: SCOPE's MANUAL ATTENTION text of that run ('' when none)."""
         def done(found: dict) -> None:
+            jobs = remote.queued_jobs(found, p.remote_root, system)
+            if attention and not jobs:                                      ## nothing waits in the queue: what SCOPE asks is the news
+                first = attention.splitlines()[0]
+                n = len([l for l in attention.splitlines() if l.strip()])
+                self.status.setText(f"Cluster run finished, but SCOPE reports {n} item(s) that need attention: {first}" + (" …" if n > 1 else "") + " (see the log)."); set_kind(self.status, "warn")
+                return
+            ended_ok(found)
+        def ended_ok(found: dict) -> None:
             jobs = remote.queued_jobs(found, p.remote_root, system)
             if jobs:
                 note = f"SCOPE has ended, but {len(jobs)} job(s) of '{system}' are still in the scheduler queue ({remote.jobs_summary(jobs)})."

@@ -263,10 +263,14 @@ A job is identified by **branch, workflow and job name**: an `opt` job for the `
 | Final state (fstate) | The state the job writes. SCOPE's default is the job name. The form proposes it for jobs that make a new geometry (opt, ts, relax), and the initial state for the others (freq, scf, td), so their results sit on the geometry they used. |
 | Constrains | Jobs that block this one once they are finished. `self` prevents running the same job twice. |
 | Software and computation type | Gaussian 16 (`g16`: scf, opt, freq, ts, td, tda) or Quantum ESPRESSO (`qe`: scf, opt, relax, vc-relax, freq) |
-| Functional, basis set, processors, queue | Chemistry and resources. The queue is optional; on a cluster it must match one of the environment's queues exactly. |
+| Functional, basis set, processors, queue | Chemistry and resources. The queue is optional; on a cluster it must match one of the environment's queues exactly. The list offers the queues of the environment and, after **Test connection** on the Cluster page, those of the cluster. |
 | Submit | When ticked, the file says `want_submit = True` and SCOPE submits jobs to the scheduler. Unticked by default. |
 
-Other settings go in the tabs below the form, one `key = value` per line. **Edit selected…** (or a double-click on a job in the graph) reopens a file in the same form; comments in the file are not kept.
+**Settings by section.** Below the form, one tab per section of the file (*&qc_data*, *&job_data*, *&options*, *&environment*) lists the other settings SCOPE has, with SCOPE's default in each field. A field left on *SCOPE default* is not written; the tab title counts the settings that are written. Only the settings that apply are shown: Gaussian or Quantum ESPRESSO ones depending on the software, `td_nstates` for td/tda, `max_steps` when *Job setup* is `rep_opt`, and so on. Changing the software drops the settings of the other one from the file. For Quantum ESPRESSO, **Show solver details** adds the convergence and mixing settings. Any other key goes in the box under the fields, one `key = value` per line; a value a field cannot show (for instance `save_wf = True`) also stays there, as written.
+
+These are SCOPE's own settings, the same on every cluster. What depends on the cluster is the queue name, the time limit (at most the queue's maximum), the processors per job (at most a node's cores), and how many jobs and processors your allocation lets you use at once (`max_jobs`, `max_procs`).
+
+**Edit selected…** (or a double-click on a job in the graph) reopens a file in the same form; comments in the file are not kept.
 
 ### Add a job after another one
 
@@ -348,10 +352,6 @@ pip install scope-qc
 
 The module names you give there are what SCOPE uses to find Gaussian 16 and Quantum ESPRESSO (see *The three lights*).
 
-### Set up a profile
-
-The page has three cards, in the order you use them. **1 · Cluster** is the profile: the connection to one cluster, shared by all workspaces. Once it is saved and complete it takes one line (who, where, where `scope` is) with **Connect…**, **Disconnect** and **Test connection**; **Edit…** shows its fields (host, user, port, path of `scope`, **Save profile**), and a new or incomplete profile shows them by itself. The three lights and, after a test, **Details of the last test** are in this card too (the details open by themselves when something needs a look). **2 · Project on the cluster** belongs to the workspace shown, so each workspace can use its own folder on the same cluster. **3 · Transfer and run** has the buttons of everyday use and the log.
-
 ### A new project folder: Set up this folder…
 
 Each project folder on the cluster needs its own environment file whose three folders are `<project>/Sources`, `<project>/Systems` and `<project>/Computations`, otherwise **Folder layout** fails. `scope config` would ask every question again. The window does it for you instead:
@@ -372,6 +372,10 @@ The same is available as a command on the cluster: `scope-project` (next to `sco
 | Only check | `scope-project ~/RUNS --check ~/scope_env_RUNS.npy` |
 
 A new project gets the folders and `<project>/scope_env_<folder name>.npy` (`--name` chooses another name). The script ends by printing the two values for **2 · Project on the cluster**: the project folder and the environment file. **--fix** keeps a backup of the file and never moves or deletes data: if the old folders hold systems, it stops and lists them (add `--force` to change the paths anyway). `--dry-run` shows what would happen. Set `SCOPE_TEMPLATE_ENV` to a working environment file in `~/.bashrc` to leave out `--from`.
+
+### Set up a profile
+
+The page has three cards, in the order you use them. **1 · Cluster** is the profile: the connection to one cluster, shared by all workspaces. Once it is saved and complete it takes one line (who, where, where `scope` is) with **Connect…**, **Disconnect** and **Test connection**; **Edit…** shows its fields (host, user, port, path of `scope`, **Save profile**), and a new or incomplete profile shows them by itself. The three lights and, after a test, **Details of the last test** are in this card too (the details open by themselves when something needs a look). **2 · Project on the cluster** belongs to the workspace shown, so each workspace can use its own folder on the same cluster. **3 · Transfer and run** has the buttons of everyday use and the log.
 
 Press **New** (or start typing, the first time), fill in the connection and press **Save profile**. If the cluster needs a password, press **Connect…** now. Then fill in the project fields: they are saved with the workspace as you type. The yellow hint under the fields says what is still missing; it turns into a green tick when both parts are complete.
 
@@ -628,10 +632,12 @@ An input file has four sections, each between `&name` and `/`.
 
 | Section | Common keys |
 |---|---|
-| `&environment` | `requested_procs`, `queue`, `time_limit` (minutes), `max_jobs`, `max_procs` |
-| `&options` | `want_submit`, `ignore_submitted`, `overwrite_inputs`, `overwrite_outputs` |
-| `&job_data` | `branch`, `workflow`, `job`, `requisites`, `constrains`, `istate`, `fstate`, `job_setup`, `save_wf` |
-| `&qc_data` | `software`, `comp_type`, `functional`, `basis` (Gaussian), `pp_library`, `mix_beta`, `elec_conv` (Quantum ESPRESSO) and more |
+| `&environment` | `requested_procs`, `queue`, `time_limit` (minutes), `max_jobs`, `max_procs`, `method` |
+| `&options` | `want_submit`, `ignore_submitted`, `overwrite_inputs` (`overwrite_outputs` is read but has no effect) |
+| `&job_data` | `branch`, `workflow`, `job`, `requisites`, `constrains`, `istate`, `fstate`, `job_setup` (`regular`, `rep_opt`, `findiff`) with `max_steps`, `energy_thres`, `findiff_displacement`, `findiff_units`; `save_wf`, `recovery`, `must_be_good` |
+| `&qc_data` | `software`, `comp_type`, `functional`. Gaussian: `basis`, `unrestricted`, `is_grimme`/`grimme_type`, `loose_opt`, `tight_opt`, `ultrafine_grid`, `fctype`, `recalc_steps`, `td_type`, `td_nstates`, `print_forces`. Quantum ESPRESSO: `pp_library`, `is_grimme`/`grimme_type`, `is_hubbard`, `uterm`, `version`, `elec_conv`, `elec_maxstep`, `mix_beta`, `mix_ndim`, `forc_conv`, `opt_maxstep`, `ion_dynamics`, `bfgs_ndim`, `trust_rad_ini`, `trust_rad_min`, `upscale`, `pressure`, `cell_dynamics`, `print_forces` |
+
+The form has a field for each of these; the tooltips say what they do and SCOPE's default.
 
 Worth knowing:
 

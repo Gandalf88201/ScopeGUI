@@ -52,13 +52,21 @@ def test_a_changed_installation_recipe_is_reported(repos):
     updates.status(mine); ok, message, recipe = updates.update(mine)
     assert ok and recipe
 
-def test_local_changes_and_local_commits_are_never_overwritten(repos):
+def test_local_changes_are_kept_and_local_commits_are_never_overwritten(repos):
     github, mine, colleague = repos
-    push_new(colleague)
+    push_new(colleague)                                                                                 # touches core/src/a.py only
     with open(os.path.join(mine, "core/pyproject.toml"), "a") as fh: fh.write("# my edit\n")
     st = updates.status(mine)
-    assert st.dirty and not st.can_update() and "uncommitted changes" in st.blocker()
-    ok, message, _ = updates.update(mine); assert not ok and "uncommitted" in message and "# my edit" in open(os.path.join(mine, "core/pyproject.toml")).read()
+    assert st.dirty and st.changed == ["core/pyproject.toml"] and st.clashes == [] and st.can_update() and st.blocker() == ""
+    ok, message, _ = updates.update(mine)                                                                # set aside, updated, put back
+    assert ok and "back in place" in message and os.path.exists(os.path.join(mine, "core/src/a.py"))
+    assert "# my edit" in open(os.path.join(mine, "core/pyproject.toml")).read() and run(mine, "stash", "list") == ""
+    commit(colleague, "core/pyproject.toml", "[project]\nname='scope-qc'\nversion='2'\n", "their edit"); run(colleague, "push", "-q", "origin", "HEAD:main")
+    before = open(os.path.join(mine, "core/pyproject.toml")).read()
+    st = updates.status(mine)                                                                            # the same lines changed on both sides
+    assert st.clashes == ["core/pyproject.toml"] and not st.can_update() and "core/pyproject.toml" in st.blocker() and "Commit them first" in st.blocker()
+    ok, message, _ = updates.update(mine)
+    assert not ok and "core/pyproject.toml" in message and open(os.path.join(mine, "core/pyproject.toml")).read() == before and run(mine, "stash", "list") == ""
     run(mine, "commit", "-q", "-am", "my own change")
     st = updates.status(mine); t = st.followed()
     assert t.ahead == 1 and t.behind == 1 and not st.can_update() and "1 commit(s) of its own" in st.blocker()

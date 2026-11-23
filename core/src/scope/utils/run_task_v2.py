@@ -9,7 +9,14 @@ import os
 import numpy as np
 from scope.classes_input import interpret_workflow_from_user, set_input_data
 from scope.read_write import load_binary
-from scope.utils.run_task import verify_files, verify_paths, verify_status
+from scope.utils.run_task import verify_files, verify_paths, verify_status, _one_line
+from scope.classes_workflow import SubmissionError
+
+def _refused(comp: object, exc: SubmissionError) -> str:
+    """The report line of a submission the scheduler refused (the other computations go on)."""
+    reason = _one_line(exc.reason)
+    print(f"RUN_TASK_V2: submission failed for {comp.out_path}: {reason}")
+    return f"Submission failed for {comp.out_path} --> {reason}\n"
 
 ########
 def run_task_v2(sys_path: str, inp_paths: list, global_env: str | object, handle_errors: bool=False, debug: int=0) -> str:
@@ -190,8 +197,11 @@ def handle_pending_computation(comp: object, environment: object, options: objec
         return f"Retry pending for {comp.out_path} --> Initial state '{comp.qc_data.istate}' is missing or lacks geometry.\n"
 
     # Submit the current attempt, which creates input files and queues the job.
-    comp.run(environment, options, debug=max(debug-1,0))
     # Marks the System for saving, even when submission fails, so that the new run number is recorded.
+    try: comp.run(environment, options, debug=max(debug-1,0))
+    except SubmissionError as exc:
+        comp._job._workflow._branch._system.should_save = True
+        return _refused(comp, exc)
     comp._job._workflow._branch._system.should_save = True
     return ''
 
@@ -309,7 +319,8 @@ def handle_failed_output(comp: object, environment: object, options: object, han
         comp.isfinished   = False
         comp.isgood       = False
         if options.want_submit and comp.verify_state(comp.qc_data.istate):
-            comp.run(environment, options, debug=max(debug-1,0))
+            try: comp.run(environment, options, debug=max(debug-1,0))
+            except SubmissionError as exc: return _refused(comp, exc)
             return ''
         if options.want_submit: 
             return f"Retry pending for {comp.out_path} --> Initial state '{comp.qc_data.istate}' is missing or lacks geometry.\n"

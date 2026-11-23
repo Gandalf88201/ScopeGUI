@@ -721,6 +721,50 @@ def queued_count_lines(root: str, system: str) -> list:
             '    if [ "$hit" = 1 ]; then n=$((n+1)); fi',
             "  done <<SCOPE_GUI_QUEUE_EOF", "$out", "SCOPE_GUI_QUEUE_EOF", '  echo "$n"', "}"]
 
+EXIT_REFUSED = 4                                                            ## `scope run` (and the run script) exit code: the scheduler refused a job
+RUN_NOTE     = "SCOPE GUI:"                                                 ## lines the run script adds to the log about `scope run`
+## What sbatch/qsub print when they refuse a job, and the line SCOPE writes for it in its MANUAL ATTENTION block.
+REFUSED_RE   = r"sbatch: error|Batch job submission failed|qsub: .*(rejected|denied|error)|Unable to run job|^Submission failed for "
+SUBMITTED_RE = r"^Submitted batch job|has been submitted"
+ATTENTION    = "### MANUAL ATTENTION REQUIRED ###"
+
+def scope_gui_run_lines(run: str) -> list:
+    """Bash function `scope_gui_run`: runs `run` (scope run), its output going to the log as before, then ends the script with scope
+    run's exit code when it failed (143 when stopped), or with EXIT_REFUSED when its output shows that the scheduler refused a job.
+    It adds the jobs submitted to $SUBMITTED_TOTAL (Slurm 'Submitted batch job', SGE 'has been submitted')."""
+    return ["SUBMITTED_TOTAL=0",
+            "scope_gui_run() {",
+            '  OUT=$(mktemp 2>/dev/null) || OUT="${TMPDIR:-/tmp}/scope_gui_run_$$.out"',
+            f'  set +e; {run} 2>&1 | tee "$OUT"; RC=${{PIPESTATUS[0]}}; set -e',
+            f"  SUB=$(grep -cE {shlex.quote(SUBMITTED_RE)} \"$OUT\" 2>/dev/null) || true",
+            f"  REFUSED=$(grep -E {shlex.quote(REFUSED_RE)} \"$OUT\" 2>/dev/null | head -n 5) || true",
+            '  rm -f "$OUT"; SUBMITTED_TOTAL=$((SUBMITTED_TOTAL + ${SUB:-0}))',
+            f'  if [ "$RC" -ne 0 ]; then echo "{RUN_NOTE} scope run ended with exit code $RC: stopping."; exit "$RC"; fi',
+            f'  if [ -n "$REFUSED" ]; then echo "{RUN_NOTE} the scheduler refused job(s), so they were not submitted:"; printf "%s\\n" "$REFUSED"; '
+            f'echo "{RUN_NOTE} see the MANUAL ATTENTION block above; fix the queue or the time limit, then press Run again."; exit {EXIT_REFUSED}; fi',
+            "}"]
+
+def manual_attention(text: str) -> str:
+    """The content of the last MANUAL ATTENTION block `scope run` printed in `text` (a run log), or '' when there is none or it says
+    that no manual action is required."""
+    lines = text.splitlines()
+    heads = [i for i, l in enumerate(lines) if l.strip() == ATTENTION]
+    if not heads: return ""
+    body = []
+    for l in lines[heads[-1] + 1:]:
+        s = l.strip()
+        if s and set(s) == {"#"}:
+            if body: break                                                  ## the closing row of '#'
+            continue                                                        ## the row under the title
+        body.append(l.rstrip())
+    out = "\n".join(body).strip()
+    return "" if out in ("", "No manual action required") else out
+
+def refused_lines(text: str) -> list:
+    """The lines of a run log that show the scheduler refusing a job (sbatch/qsub errors, SCOPE's 'Submission failed for …')."""
+    pat = re.compile(REFUSED_RE)
+    return list(dict.fromkeys(l.strip() for l in text.splitlines() if pat.search(l.strip()) and not l.startswith(RUN_NOTE)))
+
 def run_script_text(p: Profile, system: str, remote_inputs: list, quiet: bool=False, verbose: bool=False, errors: bool=False, set_path: bool=True,
                     keep_going: bool=False, poll: int=KEEP_GOING_POLL, rounds: int=KEEP_GOING_ROUNDS) -> str:
     """The script for `scope run` on the cluster. It first runs `scope set_path` from the project folder, so the paths inside the uploaded system point to the cluster folders.
@@ -728,18 +772,25 @@ def run_script_text(p: Profile, system: str, remote_inputs: list, quiet: bool=Fa
     keep_going: one `scope run` submits only the jobs that are ready and ends; a job that waits for another (freq after opt) is submitted
     by a later run. With keep_going the script stays: after each `scope run` it counts this system's jobs in the queue; none left means
     done (that run has read the last outputs); otherwise it looks again every `poll` seconds and, once they have all left the queue, runs
-    `scope run` again. It stops when `scope run` fails, when the queue cannot be read, or after `rounds` runs. Stop ends it at any point."""
+    `scope run` again. It stops when `scope run` fails, when the queue cannot be read, or after `rounds` runs. Stop ends it at any point.
+
+    Either way `scope run` goes through scope_gui_run_lines: the script ends with scope run's own exit code when it fails, and with
+    EXIT_REFUSED when the scheduler refused a job even though scope run ended with 0 (a SCOPE older than the fix that reports it)."""
     scope = scope_program(p); root = shell_path(p.remote_root.rstrip("/")); env = shell_path(p.remote_env); s = shlex.quote(system)
     flags = " ".join(f for f, on in (("-q", quiet), ("-v", verbose), ("-e", errors)) if on)
     lines = ["set -e", "export TERM=dumb PYTHONUNBUFFERED=1", *activation_lines(p), f"cd {root}"]
     if set_path: lines.append(f"{scope} set_path -n {env} -s {s}")
     run = f"{scope} run -n {env} -s {s} -i " + " ".join(shell_path(i) for i in remote_inputs) + (f" {flags}" if flags else "")
-    if not keep_going: return "\n".join(lines + [run]) + "\n"
+    lines += scope_gui_run_lines(run)
+    if not keep_going: return "\n".join(lines + ["scope_gui_run"]) + "\n"
     minutes = f"{poll // 60} minute(s)" if poll >= 60 else f"{poll} s"
     lines += queued_count_lines(root, system) + [
-        "ROUND=1", "while :; do",
-        f'  echo "{KEEP_GOING} run $ROUND ($(date "+%Y-%m-%d %H:%M")): scope run"', f"  {run}", "  N=$(scope_gui_queued)",
-        f'  if [ "$N" = 0 ]; then echo "{KEEP_GOING} no job of this system is left in the queue: done after $ROUND run(s)."; break; fi',
+        "ROUND=1; SEEN=0", "while :; do",
+        f'  echo "{KEEP_GOING} run $ROUND ($(date "+%Y-%m-%d %H:%M")): scope run"', "  scope_gui_run", "  N=$(scope_gui_queued)",
+        '  if [ "$N" -gt 0 ]; then SEEN=1; fi',
+        f'  if [ "$N" = 0 ]; then if [ "$SUBMITTED_TOTAL" = 0 ] && [ "$SEEN" = 0 ]; then echo "{KEEP_GOING} no job of this system is in the queue and no job was submitted: '
+        f'done after $ROUND run(s). Nothing was ready to run; if you expected jobs, read the MANUAL ATTENTION block above."; '
+        f'else echo "{KEEP_GOING} no job of this system is left in the queue: done after $ROUND run(s)."; fi; break; fi',
         f'  if [ "$N" -lt 0 ]; then echo "{KEEP_GOING} the scheduler queue cannot be read here, so the end of the jobs cannot be seen: stopping. Press Run again when they have finished."; break; fi',
         f'  if [ "$ROUND" -ge {int(rounds)} ]; then echo "{KEEP_GOING} {int(rounds)} runs reached: stopping ($N job(s) still in the queue). Press Run again to go on."; break; fi',
         f'  echo "{KEEP_GOING} $N job(s) of this system in the queue: looking again every {minutes} (Stop ends the wait)."',

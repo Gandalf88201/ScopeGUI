@@ -14,7 +14,7 @@ class Queue(object):
 
     Attributes:
         name (str):                     Normalized queue name.
-        alter_name (str):               Original queue name.
+        alter_name (str):               Alias the queue is also found by (by default its name; an exact name always wins over an alias).
         available (bool):               Whether the queue is available for use.
         selected (bool):                Whether the queue has been selected.
         time_limit (float | None):      Maximum wall time in minutes.
@@ -36,7 +36,7 @@ class Queue(object):
         if avail == "up":  self.available  = True
         else:              self.available  = False
         self.name                = fix_partition_name(name)
-        self.alter_name          = name
+        self.alter_name          = self.name                ## not the raw name: sinfo marks the default partition 'std*'
         self.time_limit_plain    = time_limit
         seconds                  = _read_queue_time(time_limit, _environment.scheduler)
         self.time_limit          = None if seconds is None else seconds/60
@@ -418,8 +418,9 @@ def get_submission_time_limit(queue: object) -> int | float | str | None:
     """Returns the requested wall time in minutes or the clock string from an older Queue.
 
     Uses the task's time_limit first, then the queue's finite maximum. An
-    unlimited queue uses its configured default or 30 days. Returns None when the
-    queue limit is unknown and the task supplies none.
+    unlimited queue uses its configured default, else the Environment's
+    fallback_time_limit (set with scope config), else 30 days. Returns None when
+    the queue limit is unknown and the task supplies none.
     """
     time_limit = getattr(queue._environment,'time_limit',None)
     if time_limit is None:
@@ -428,7 +429,7 @@ def get_submission_time_limit(queue: object) -> int | float | str | None:
         base, _, host_limits = str(raw_limit).partition(',')
         # For SGE, time_limit includes the shortest finite host override to the base limit.
         if _queue_time_marker(base) == 'unlimited' and (not host_limits or time_limit is None):
-            time_limit = getattr(queue,'default_time_limit',None) or 30*24*60
+            time_limit = getattr(queue,'default_time_limit',None) or getattr(queue._environment,'fallback_time_limit',None) or 30*24*60
 
     # Slurm grants whole minutes, so a 90-second request is written as 00:02:00.
     if queue._environment.scheduler == 'slurm' and isinstance(time_limit,float):
