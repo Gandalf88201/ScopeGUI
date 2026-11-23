@@ -293,8 +293,7 @@ def gen_qe_subfile(comp: object, queue: object, module: str, procs: int=1, exe: 
     SIGKILL cannot be handled.
     """
     import shlex
-    from scope.classes_queue import get_submission_time_limit
-    from scope.utils.core_tools import gen_run_block, gen_sge_time_directives, get_slurm_signal_time
+    from scope.utils.core_tools import gen_run_block, gen_sge_time_directives, gen_slurm_time_directives
     warning_signal = 'USR1'
     wf_prepare, wf_store = gen_qe_wf_blocks(comp, debug=debug)
     stderr_path = shlex.quote(os.path.abspath(os.path.join(comp.path, comp.name+'.stderr')))
@@ -324,9 +323,7 @@ def gen_qe_subfile(comp: object, queue: object, module: str, procs: int=1, exe: 
             print(f"#SBATCH --nodes=1", file=sub)
             print(f"#SBATCH --ntasks={procs}", file=sub)
             print(f"#SBATCH --mem-per-cpu=1900MB", file=sub)
-            time_limit = get_submission_time_limit(queue)
-            if time_limit is not None: print(f"#SBATCH --time={time_limit}", file=sub)
-            print(f"#SBATCH --signal=B:USR1@{get_slurm_signal_time(time_limit)}", file=sub)
+            print(gen_slurm_time_directives(queue), file=sub)
 
         elif queue._environment.scheduler == 'sge':
             print(f"#!/bin/bash", file=sub)

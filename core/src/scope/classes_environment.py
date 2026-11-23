@@ -26,7 +26,7 @@ class Environment(object):
         available_queues (list):        Queues discovered for this environment.
         selected_queues (list):         Queues selected for submission.
         method (str):                   Queue scoring strategy.
-        time_limit (int | None):        Input-specific wall time in minutes; None uses the queue limit.
+        time_limit (int | float | None): Task wall time in minutes, including fractional minutes. None uses the queue limit.
         software_checks (dict):         Most recent static checks of configured software modules.
         qe_launcher (str):              Preferred QE MPI launcher, configurable by the user.
         g16_launcher (str):             Gaussian driver command (normally 'g16').

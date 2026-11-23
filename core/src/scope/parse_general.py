@@ -1,4 +1,5 @@
 import re
+from decimal import Context, Decimal, localcontext
 from math import isfinite
 from scope import constants
 
@@ -44,42 +45,45 @@ def parse_time(value: str | int | float, output_unit: str='seconds', *, input_un
     output_scale = constants._seconds_per_unit(output_unit)
     number       = r'(?:\d+(?:\.\d+)?|\.\d+)(?:e[+-]?\d+)?'
 
-    if re.fullmatch(number,text):
-        seconds = float(text)*input_scale
+    # Decimal arithmetic keeps exact limits such as 1.1h (66 minutes) on the scheduler boundary.
+    # Values beyond the supported range become nonfinite and raise ValueError below.
+    with localcontext(Context(traps=[])):
+        if re.fullmatch(number,text):
+            seconds = Decimal(text)*Decimal(str(input_scale))
 
-    elif ':' in text or re.match(r'\d+-',text):
-        day_prefix = r'(?:(\d+)(?:-|\s+(?:days?,?\s+)?))?'
-        clock = re.fullmatch(day_prefix + r'(\d+(?::\d+){0,3}(?:[.,]\d+)?)',text)
-        if clock is None: raise ValueError(f'Invalid elapsed time: {value!r}')
-        days, clock_time = clock.groups()
-        fields = clock_time.replace(',','.').split(':')
-        # Day-prefixed clocks start with hours. Other clocks end with seconds.
-        weights = (3600,60,1)
-        if days is None: weights = (86400,3600,60,1)[-len(fields):]
-        elif len(fields) > 3: raise ValueError(f'Invalid elapsed time: {value!r}')
-        seconds = float(days or 0)*86400 + sum(float(field)*weight for field,weight in zip(fields,weights))
+        elif ':' in text or re.match(r'\d+-',text):
+            day_prefix = r'(?:(\d+)(?:-|\s+(?:days?,?\s+)?))?'
+            clock = re.fullmatch(day_prefix + r'(\d+(?::\d+){0,3}(?:[.,]\d+)?)',text)
+            if clock is None: raise ValueError(f'Invalid elapsed time: {value!r}')
+            days, clock_time = clock.groups()
+            fields = clock_time.replace(',','.').split(':')
+            # Day-prefixed clocks start with hours. Other clocks end with seconds.
+            weights = (3600,60,1)
+            if days is None: weights = (86400,3600,60,1)[-len(fields):]
+            elif len(fields) > 3: raise ValueError(f'Invalid elapsed time: {value!r}')
+            seconds = int(days or 0)*86400 + sum(Decimal(field)*weight for field,weight in zip(fields,weights))
 
-    elif text.startswith('p'):
-        amount    = r'(\d+(?:[.,]\d+)?)'
-        days_part = rf'(?:{amount}d)?'
-        time_part = rf'(?:{amount}h)?(?:{amount}m)?(?:{amount}s)?'
-        iso       = re.fullmatch(rf'p(?:{amount}w|{days_part}(?:t{time_part})?)',text)
-        if iso is None or text == 'p' or text.endswith('t'): raise ValueError(f'Invalid elapsed time: {value!r}')
-        seconds = 0
-        for field,unit in zip(iso.groups(),'wdhms'):
-            if field is not None: seconds += float(field.replace(',','.'))*constants.TIME_UNITS[unit]
+        elif text.startswith('p'):
+            amount    = r'(\d+(?:[.,]\d+)?)'
+            days_part = rf'(?:{amount}d)?'
+            time_part = rf'(?:{amount}h)?(?:{amount}m)?(?:{amount}s)?'
+            iso       = re.fullmatch(rf'p(?:{amount}w|{days_part}(?:t{time_part})?)',text)
+            if iso is None or text == 'p' or text.endswith('t'): raise ValueError(f'Invalid elapsed time: {value!r}')
+            seconds = 0
+            for field,unit in zip(iso.groups(),'wdhms'):
+                if field is not None: seconds += Decimal(field.replace(',','.'))*constants.TIME_UNITS[unit]
 
-    else:
-        seconds = 0
-        end     = 0
-        for term in re.finditer(rf'({number})\s*([a-zμ]+)',text):
-            separator = text[end:term.start()].strip()
-            allowed   = ('',',','and',', and') if end else ('',)
-            if separator not in allowed: raise ValueError(f'Invalid elapsed time: {value!r}')
-            seconds += float(term[1])*constants._seconds_per_unit(term[2])
-            end = term.end()
-        if end == 0 or text[end:] not in ('','.'): raise ValueError(f'Invalid elapsed time: {value!r}')
+        else:
+            seconds = 0
+            end     = 0
+            for term in re.finditer(rf'({number})\s*([a-zμ]+)',text):
+                separator = text[end:term.start()].strip()
+                allowed   = ('',',','and',', and') if end else ('',)
+                if separator not in allowed: raise ValueError(f'Invalid elapsed time: {value!r}')
+                seconds += Decimal(term[1])*Decimal(str(constants._seconds_per_unit(term[2])))
+                end = term.end()
+            if end == 0 or text[end:] not in ('','.'): raise ValueError(f'Invalid elapsed time: {value!r}')
 
-    result = seconds/output_scale
+        result = float(seconds/Decimal(str(output_scale)))
     if not isfinite(result): raise ValueError(f'Elapsed time is too large: {value!r}')
     return result

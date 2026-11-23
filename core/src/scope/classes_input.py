@@ -3,6 +3,7 @@ import sys
 import numpy as np
 from ast import literal_eval
 from fnmatch import fnmatchcase
+from scope.parse_general import parse_time
 
 ######################
 def interpret_software(name: str):
@@ -166,18 +167,32 @@ class Input_data(object):
 
 #######################
 def check_environment_data(data: object, debug: int=0) -> None:
-    """Validates supplied environment settings without changing data.
+    """Validates environment settings and stores a supplied time limit in minutes.
 
     Accepted values:
-        - time_limit: positive integer in minutes or None ('none' in parsed input).
+        - time_limit: any format accepted by parse_time(), with a minimum of one minute, or None to use the queue limit.
+          Bare numbers are minutes. Examples include 30, '1w', '2d12h30m' and '90s'.
 
-    Missing optional settings use defaults when filled. Raises ValueError for
-    invalid data; returns None otherwise.
+    A supplied 'none' selects the queue limit. Raises ValueError for an invalid
+    time limit and leaves the original value in place.
     """
-    time_limit = getattr(data,'time_limit',None)
-    if isinstance(time_limit,str) and time_limit == 'none': return
-    if time_limit is not None and (isinstance(time_limit,bool) or not isinstance(time_limit,int) or time_limit <= 0):
-        raise ValueError("CHECK_ENVIRONMENT_DATA: time_limit must be a positive integer in minutes, or None")
+    value = getattr(data,'time_limit',None)
+    if value is None:
+        return
+    if isinstance(value,str) and value.strip().lower() == 'none':
+        minutes = None
+    else:
+        try:
+            minutes = parse_time(value,input_unit='minutes',output_unit='minutes')
+        except ValueError as exc:
+            raise ValueError(f"CHECK_ENVIRONMENT_DATA: invalid time_limit {value!r}: {exc}") from exc
+        if minutes < 1:
+            raise ValueError("CHECK_ENVIRONMENT_DATA: time_limit must be at least 1 minute")
+        if isinstance(value,(int,float)): return  # Bare numbers already store minutes.
+        if minutes.is_integer(): minutes = int(minutes)
+
+    if isinstance(data,Input_data): data._mod_attr('time_limit',minutes)
+    else:                          data.time_limit = minutes
 
 def check_options_data(data: object, debug: int=0) -> None:
     """Validates supplied submission/overwrite flags without changing data.
@@ -284,10 +299,10 @@ def check_qc_data(data: object, debug: int=0) -> None:
 
 #######################
 def fill_environment_data(data: object, debug: int=0):
-    """Adds resource defaults and normalizes a parsed 'none' time limit.
+    """Adds missing environment resource defaults and returns the same object.
 
-    Expects data accepted by check_environment_data(); returns the same object.
-    time_limit is in integer minutes. None uses the selected queue's maximum.
+    Expects settings validated by check_environment_data(). An omitted time limit
+    defaults to None, which uses the selected queue's maximum.
     Unlimited queues use their configured default when available, otherwise 30 days.
     """
     ## Adds defaults to environment data
@@ -296,8 +311,6 @@ def fill_environment_data(data: object, debug: int=0):
     if not hasattr(data,"max_procs"):         data._add_attr("max_procs",int(320)) 
     if not hasattr(data,"method"):            data._add_attr("method","weighted") 
     if not hasattr(data,"time_limit"):        data._add_attr("time_limit",None)
-    
-    if isinstance(data.time_limit,str) and data.time_limit == 'none': data._mod_attr('time_limit',None)
     return data
 
 def fill_options_data(data: object, debug: int=0):
@@ -439,7 +452,7 @@ def harmonize_input_data(environment: object, options: object, job_data: object,
 
 #######################
 def set_environment_data(content, section="&environment", isfile: bool=True, debug: int=0):
-    """Parses and validates environment settings, then adds defaults."""
+    """Reads and validates environment settings, then adds defaults."""
     environment = Input_data(content=content, section=section, isfile=isfile, debug=debug)
     check_environment_data(environment, debug=max(debug-1,0))
     environment = fill_environment_data(environment)
