@@ -293,7 +293,7 @@ def gen_qe_subfile(comp: object, queue: object, module: str, procs: int=1, exe: 
     SIGKILL cannot be handled.
     """
     import shlex
-    from scope.utils.core_tools import gen_run_block, gen_sge_time_directives, get_slurm_signal_time
+    from scope.utils.core_tools import gen_run_block, gen_sge_time_directives, get_slurm_signal_time, get_slurm_time_limit
     warning_signal = 'USR1'
     wf_prepare, wf_store = gen_qe_wf_blocks(comp, debug=debug)
     stderr_path = shlex.quote(os.path.abspath(os.path.join(comp.path, comp.name+'.stderr')))
@@ -323,8 +323,7 @@ def gen_qe_subfile(comp: object, queue: object, module: str, procs: int=1, exe: 
             print(f"#SBATCH --nodes=1", file=sub)
             print(f"#SBATCH --ntasks={procs}", file=sub)
             print(f"#SBATCH --mem-per-cpu=1900MB", file=sub)
-            time_limit = getattr(queue._environment,'time_limit',None) # If the user supplies a time limit, it is stored in the environment
-            if time_limit is None: time_limit = queue.time_limit       # Otherwise requests the queue's maximum wall time.
+            time_limit = get_slurm_time_limit(queue)                   # The input's time limit, else the queue's maximum, its default, or the Environment's fallback.
             if time_limit is not None: print(f"#SBATCH --time={time_limit}", file=sub)
             print(f"#SBATCH --signal=B:USR1@{get_slurm_signal_time(time_limit)}", file=sub)
 

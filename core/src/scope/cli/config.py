@@ -25,6 +25,7 @@ def config(args):
     env.set_software()
     env.check_software(debug=1)
     env.set_queues()
+    env.set_fallback_time_limit()
 
     env.save()
 
@@ -41,6 +42,7 @@ def config(args):
     print(f"     2) To change Software Modules:              env.set_software():")
     print(f"     3) To change Available Queues/Partitions:   env.set_queues():")
     print(f"     4) To repeat static software checks:        env.check_software()")
+    print(f"     5) To change the fallback wall time:        env.set_fallback_time_limit():")
     #print(f"     4) To change Storage Path:                  env.set_storage_path():")
     print("")
     if env.scheduler != 'local': 

@@ -11,7 +11,7 @@ class Queue(object):
 
     Attributes:
         name (str):                     Normalized queue name.
-        alter_name (str):               Original queue name.
+        alter_name (str):               Alias the queue is also found by (by default its name; an exact name always wins over an alias).
         available (bool):               Whether the queue is available for use.
         selected (bool):                Whether the queue has been selected.
         time_limit (float | None):      Maximum wall time in minutes.
@@ -33,7 +33,7 @@ class Queue(object):
         if avail == "up":  self.available  = True
         else:              self.available  = False
         self.name                = fix_partition_name(name)
-        self.alter_name          = name
+        self.alter_name          = self.name                ## not the raw name: sinfo marks the default partition 'std*'
         self.time_limit_plain    = time_limit
         seconds                  = _queue_time_to_seconds(time_limit, _environment.scheduler)
         self.time_limit          = None if seconds is None else seconds/60

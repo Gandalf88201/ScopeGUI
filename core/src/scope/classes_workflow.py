@@ -8,6 +8,12 @@ from scope.register_data              import reg_general, reg_optimization, reg_
 from scope.read_write                import read_lines_file
 from scope                            import __version__
 
+class SubmissionError(RuntimeError):
+    """The scheduler refused a job (sbatch/qsub exited non-zero). `reason` is the scheduler's own message."""
+    def __init__(self, message: str, reason: str=""):
+        super().__init__(message)
+        self.reason = reason or message
+
 ##########################
 ###### BRANCH CLASS ######
 ##########################
@@ -1320,21 +1326,43 @@ class Computation(object):
 
 ###########################################
     def submit(self, environment: object, want_job_id: bool=False, debug: int=0) -> None:
+        """Submits the job file to the scheduler from the computation folder.
+
+        Raises SubmissionError when the submit command fails (sbatch or qsub exits
+        non-zero, e.g. a partition the account cannot use or a missing wall time).
+        The scheduler's output is printed either way.
+        """
         currdir = os.getcwd()
         ## Goes to path. Otherwise subprocess will fail
         os.chdir(self.path)
+        try: self._submit(environment, want_job_id=want_job_id, debug=debug)
+        except SubmissionError:
+            ## The refused job file (wrong queue, no --time…) is set aside as <name>.refused: the next run writes a new one, also with overwrite_inputs=False.
+            if os.path.isfile(self.sub_name): os.replace(self.sub_name, self.sub_name + ".refused")
+            raise
+        finally: os.chdir(currdir)  ## We go back to the original directory, also when the submission fails
 
+    def _submit(self, environment: object, want_job_id: bool=False, debug: int=0) -> None:
+        self.submit_failed = False
         ## If job_id is selected. Tries to get it and store it. Else, it just runs
-        if not want_job_id: 
-            subprocess.run(['bash','-c', f"{environment.commands['submit']} {self.sub_name}"])
+        if not want_job_id:
+            res = subprocess.run(['bash','-c', f"{environment.commands['submit']} {self.sub_name}"], capture_output=True, text=True)
+            if res.stdout: print(res.stdout, end='')
+            if res.stderr: print(res.stderr, end='')
             self.job_id = None
-        else: 
+            if res.returncode != 0:
+                self.submit_failed = True
+                why = res.stderr.strip() or res.stdout.strip() or f"exit code {res.returncode}"
+                raise SubmissionError(f"COMPUTATION.SUBMIT: submission failed for {self.sub_name}:\n{why}", why)
+        else:
 
             ### ALL below should go to environment
             res  = run_command(f"{environment.commands['submit']} {self.sub_name}")
-            if not res.ok: raise RuntimeError(f"COMPUTATION.SUBMIT: Submission Failed: \n{res.command}\n{res.stderr}")
+            if not res.ok:
+                self.submit_failed = True
+                raise SubmissionError(f"COMPUTATION.SUBMIT: Submission Failed: \n{res.command}\n{res.stderr}", res.stderr.strip() or f"exit code {res.returncode}")
             text = res.stdout.rstrip().splitlines()[0]
-                
+
             if environment.management_type == "sge":
                 blocks = text.split()
                 if len(blocks) == 7 and blocks[2].isdigit() and blocks[6] == 'submitted':   
@@ -1352,8 +1380,7 @@ class Computation(object):
                 else:
                     print(f"COMPUTATION.SUBMIT: job submitted with unknown job_id. Blocks: {blocks}")
                     self.job_id = None
-        os.chdir(currdir)  ## We go back to the original directory
- 
+
 ###########################################
     def run(self, environment: object, options: object, debug: int=0) -> None:
         from scope.software.quantum_espresso.qe_input    import gen_qe_input, gen_qe_subfile 

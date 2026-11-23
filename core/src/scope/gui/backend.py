@@ -345,6 +345,179 @@ SECTIONS       = ("environment", "options", "job_data", "qc_data")
 SOFTWARE_TYPES = {"g16": ["scf", "opt", "freq", "ts", "td", "tda"], "qe": ["scf", "opt", "relax", "vc-relax", "freq"]}
 FORM_KEYS      = {"environment": ["requested_procs", "queue", "queues"], "options": ["want_submit"], "job_data": ["branch", "workflow", "job", "istate", "fstate", "requisites", "constrains"], "qc_data": ["software", "comp_type", "functional", "basis"]}
 
+@dataclass(frozen=True)
+class Option:
+    """One optional SCOPE setting the input form has a field for (see OPTIONS).
+
+    Attributes:
+        section (str):     Section of the input file ('environment', 'options', 'job_data' or 'qc_data').
+        key (str):         Key written in the file.
+        label (str):       Name shown in the form.
+        kind (str):        'bool', 'choice', 'int' or 'float'.
+        default:           SCOPE's default value (classes_input.fill_*), used when the key is not written.
+        shown (str):       How the default is shown ('queue maximum', 'off'…).
+        help (str):        Tooltip: what the setting does.
+        choices (tuple):   Accepted values of a 'choice' setting.
+        when (Callable):   ctx -> bool: whether the setting applies (software, computation type, other settings). None = always.
+        detail (bool):     A solver detail, listed only when the user asks for them (or when the file sets it).
+    """
+    section: str
+    key:     str
+    label:   str
+    kind:    str
+    default: object
+    shown:   str
+    help:    str
+    choices: tuple = ()
+    when:    "Callable | None" = None
+    detail:  bool = False
+
+def _g16(c): return c["software"] == "g16"
+def _qe(c):  return c["software"] == "qe"
+QE_GEOMETRY = ("opt", "relax", "vc-relax")
+
+## SCOPE's own settings (classes_input.py, classes_workflow.py and the software writers); none depends on the cluster, except the
+## time limit (at most the queue's) and, through the user's allocation, max_jobs and max_procs. overwrite_outputs is left out: SCOPE
+## reads it but nothing uses it.
+OPTIONS = (
+    Option("environment", "time_limit", "Time limit, minutes", "int", None, "the queue's maximum",
+           "Wall time asked to the scheduler for each job, in minutes. Empty: the maximum of the queue it is sent to. It cannot exceed that "
+           "maximum, which is set by the cluster."),
+    Option("environment", "max_jobs", "Max. jobs at once", "int", 100, "100",
+           "SCOPE stops submitting while you have this many jobs queued or running on the cluster (all your jobs are counted, not only SCOPE's)."),
+    Option("environment", "max_procs", "Max. processors at once", "int", 320, "320",
+           "SCOPE stops submitting while your queued and running jobs use this many processors. Keep it within your allocation on the cluster."),
+    Option("environment", "method", "Queue choice", "choice", "weighted", "weighted",
+           "How SCOPE picks among several queues: 'weighted' (free cores × priority / size), 'total' (most free cores) or 'ratio' (largest free "
+           "fraction). It matters only when several queues are given.", ("weighted", "total", "ratio")),
+
+    Option("options", "ignore_submitted", "Resubmit queued jobs", "bool", False, "False",
+           "True: a job that is already queued or running is written and submitted again. False: SCOPE waits for it."),
+    Option("options", "overwrite_inputs", "Rewrite input files", "bool", True, "True",
+           "True: input and submission files that already exist are written again from the current settings. False: they are kept."),
+
+    Option("job_data", "job_setup", "Job setup", "choice", "regular", "regular",
+           "'regular': one calculation per source. 'rep_opt': repeats the optimization until the energy stops changing. 'findiff': finite "
+           "differences (Quantum ESPRESSO 'scf' on a periodic source; the final state must differ from the initial one).", ("regular", "rep_opt", "findiff")),
+    Option("job_data", "max_steps", "Max. repetitions", "int", 5, "5", "rep_opt: most optimizations run one after the other.",
+           when=lambda c: c["job_setup"] == "rep_opt"),
+    Option("job_data", "energy_thres", "Energy threshold, Hartree", "float", 1e-5, "1e-5",
+           "rep_opt: the repetitions stop when the energy changes less than this between two of them.", when=lambda c: c["job_setup"] == "rep_opt"),
+    Option("job_data", "findiff_displacement", "Displacement", "float", 0.01, "0.01", "findiff: length of each atomic displacement, in the units below.",
+           when=lambda c: c["job_setup"] == "findiff"),
+    Option("job_data", "findiff_units", "Displacement units", "choice", "bohr", "bohr", "findiff: units of the displacement.", ("bohr", "angstrom"),
+           when=lambda c: c["job_setup"] == "findiff"),
+    Option("job_data", "save_wf", "Keep the wavefunction", "choice", False, "no",
+           "Stores the wavefunction of the calculation: 'job' in this job's folder, 'workflow' in one place shared by the workflow's jobs.", ("job", "workflow")),
+    Option("job_data", "recovery", "Recovery strategy", "choice", "standard", "standard",
+           "What SCOPE changes to restart a failed Quantum ESPRESSO calculation: 'standard' or 'diverse' (three different attempts). Gaussian has 'standard' only.",
+           ("standard", "diverse"), when=_qe),
+    Option("job_data", "must_be_good", "Followers need success", "bool", True, "True",
+           "True: jobs that wait for this one start only if it ends well. False: they start once it has finished, even if it failed, and SCOPE does not retry it automatically when it fails."),
+
+    Option("qc_data", "unrestricted", "Unrestricted", "bool", False, "False", "Unrestricted calculation (U prefix on the functional).", when=_g16),
+    Option("qc_data", "is_grimme", "Dispersion (Grimme)", "bool", False, "False",
+           "Adds Grimme's empirical dispersion correction (ignored with wb97xd, which includes it).", when=lambda c: c["software"] in ("g16", "qe")),
+    Option("qc_data", "grimme_type", "Dispersion type", "choice", "d3bj", "d3bj", "Version of the correction. d3m and d3mbj exist for Quantum ESPRESSO only.",
+           ("d2", "d3", "d3bj", "d3m", "d3mbj"), when=lambda c: c["is_grimme"] is True),
+    Option("qc_data", "loose_opt", "Loose convergence", "bool", False, "False", "Optimization with Gaussian's 'loose' criteria (wins over tight).",
+           when=lambda c: _g16(c) and c["comp_type"] == "opt"),
+    Option("qc_data", "tight_opt", "Tight convergence", "bool", False, "False", "Optimization with 'VeryTight' criteria and the ultrafine grid.",
+           when=lambda c: _g16(c) and c["comp_type"] == "opt"),
+    Option("qc_data", "ultrafine_grid", "Ultrafine grid", "bool", False, "False", "Integration grid Int=Ultrafine (tight convergence adds it already).",
+           when=lambda c: _g16(c) and not (c["tight_opt"] is True and c["comp_type"] == "opt")),
+    Option("qc_data", "fctype", "Force constants", "choice", "recalcfc", "recalcfc",
+           "How the Hessian is obtained during the optimization: recomputed every N steps (recalcfc), computed at the start (calcfc) or at every step (calcall).",
+           ("recalcfc", "calcfc", "calcall"), when=lambda c: _g16(c) and c["comp_type"] in ("opt", "ts")),
+    Option("qc_data", "recalc_steps", "Recompute every N steps", "int", 30, "30", "recalcfc: steps between two Hessian calculations.",
+           when=lambda c: _g16(c) and c["comp_type"] in ("opt", "ts") and c["fctype"] == "recalcfc"),
+    Option("qc_data", "td_type", "Excited states", "choice", "singlets", "singlets", "Spin of the excited states (ignored for open-shell species).",
+           ("singlets", "triplets", "50-50"), when=lambda c: _g16(c) and c["comp_type"] in ("td", "tda")),
+    Option("qc_data", "td_nstates", "Number of states", "int", 10, "10", "Excited states computed.", when=lambda c: _g16(c) and c["comp_type"] in ("td", "tda")),
+    Option("qc_data", "print_forces", "Print forces", "bool", False, "False", "Writes the forces of a single-point (scf) calculation.",
+           when=lambda c: c["comp_type"] == "scf"),
+
+    Option("qc_data", "pp_library", "Pseudopotentials", "choice", "vanderbilt", "vanderbilt",
+           "Library of pseudopotentials. 'efficiency' and 'precision' (SSSP) must be installed in SCOPE's PP_Libraries folder where the jobs run.",
+           ("vanderbilt", "efficiency", "precision"), when=_qe),
+    Option("qc_data", "is_hubbard", "Hubbard U", "bool", False, "False", "Adds a Hubbard U term (DFT+U).", when=_qe),
+    Option("qc_data", "uterm", "U value, eV", "float", 2.35, "2.35", "Value of the Hubbard U.", when=lambda c: _qe(c) and c["is_hubbard"] is True),
+    Option("qc_data", "version", "QE version", "float", 7.0, "7.0", "Version of Quantum ESPRESSO on the cluster; it decides how the Hubbard term is written.",
+           when=lambda c: _qe(c) and c["is_hubbard"] is True),
+    Option("qc_data", "elec_conv", "SCF convergence, Ry", "float", 1e-8, "1e-8", "conv_thr of the SCF cycle.", when=_qe, detail=True),
+    Option("qc_data", "elec_maxstep", "SCF max. steps", "int", 200, "200", "electron_maxstep.", when=_qe, detail=True),
+    Option("qc_data", "mix_beta", "Mixing beta", "float", 0.7, "0.7", "mixing_beta of the SCF cycle; lower it when the SCF oscillates.", when=_qe, detail=True),
+    Option("qc_data", "mix_ndim", "Mixing dimension", "int", 8, "8", "mixing_ndim.", when=_qe, detail=True),
+    Option("qc_data", "forc_conv", "Force convergence, Ry/Bohr", "float", 1e-4, "1e-4", "forc_conv_thr of the optimization.",
+           when=lambda c: _qe(c) and c["comp_type"] in QE_GEOMETRY),
+    Option("qc_data", "opt_maxstep", "Optimization max. steps", "int", 100, "100", "nstep of the optimization.", when=lambda c: _qe(c) and c["comp_type"] in QE_GEOMETRY),
+    Option("qc_data", "ion_dynamics", "Ion dynamics", "choice", "bfgs", "bfgs", "ion_dynamics.", ("bfgs", "damp"),
+           when=lambda c: _qe(c) and c["comp_type"] in QE_GEOMETRY, detail=True),
+    Option("qc_data", "bfgs_ndim", "BFGS history", "int", 1, "1", "bfgs_ndim.", when=lambda c: _qe(c) and c["comp_type"] in QE_GEOMETRY, detail=True),
+    Option("qc_data", "trust_rad_ini", "Initial trust radius, Bohr", "float", 0.1, "0.1", "trust_radius_ini.", when=lambda c: _qe(c) and c["comp_type"] in QE_GEOMETRY, detail=True),
+    Option("qc_data", "trust_rad_min", "Minimum trust radius, Bohr", "float", 1e-6, "1e-6", "trust_radius_min.", when=lambda c: _qe(c) and c["comp_type"] in QE_GEOMETRY, detail=True),
+    Option("qc_data", "upscale", "Upscale", "int", 100, "100", "upscale (tightens the SCF threshold near convergence).", when=lambda c: _qe(c) and c["comp_type"] in QE_GEOMETRY, detail=True),
+    Option("qc_data", "pressure", "Pressure, kbar", "float", 0, "0", "Target pressure of the variable-cell relaxation.", when=lambda c: _qe(c) and c["comp_type"] == "vc-relax"),
+    Option("qc_data", "cell_dynamics", "Cell dynamics", "choice", "bfgs", "bfgs", "cell_dynamics.", ("bfgs", "damp-pr", "damp-w"),
+           when=lambda c: _qe(c) and c["comp_type"] == "vc-relax", detail=True),
+)
+OPTION = {(o.section, o.key): o for o in OPTIONS}
+
+def option_value(option: Option, raw: str):
+    """The value SCOPE reads from `raw` (as written after '='), or raises ValueError when it is not one the option accepts.
+    Strings are compared in lower case, as SCOPE lowers them."""
+    import ast
+    raw = str(raw).strip()
+    if option.kind == "int":
+        if not re.fullmatch(r"[+-]?\d+", raw): raise ValueError(f"{option.label} ({option.key}): '{raw}' is not a whole number.")
+        return int(raw)
+    if option.kind == "float":
+        try: value = float(raw)
+        except ValueError: raise ValueError(f"{option.label} ({option.key}): '{raw}' is not a number.") from None
+        if value != value or value in (float("inf"), float("-inf")): raise ValueError(f"{option.label} ({option.key}): '{raw}' is not a finite number.")
+        return int(value) if re.fullmatch(r"[+-]?\d+", raw) else value
+    try: value = ast.literal_eval(raw)
+    except Exception: value = raw
+    if isinstance(value, str): value = value.strip().lower()
+    accepted = (True, False) if option.kind == "bool" else option.choices
+    if not any(value is a if isinstance(a, bool) else value == a for a in accepted):
+        raise ValueError(f"{option.label} ({option.key}): '{raw}' is not one of {', '.join(map(str, accepted))}.")
+    return value
+
+def option_context(software: str, comp_type: str, settings: "dict | None") -> dict:
+    """What the conditions of OPTIONS look at: software, computation type, and every option's value (SCOPE's default when not set or
+    not readable)."""
+    ctx = {"software": software, "comp_type": comp_type}
+    for o in OPTIONS:
+        raw = (settings or {}).get(o.section, {}).get(o.key, "")
+        try: ctx[o.key] = option_value(o, raw) if str(raw).strip() else o.default
+        except ValueError: ctx[o.key] = o.default
+    return ctx
+
+def applies(option: Option, ctx: dict) -> bool:
+    return option.when is None or bool(option.when(ctx))
+
+def option_problems(software: str, comp_type: str, settings: "dict | None") -> list:
+    """The values of the option fields that SCOPE would refuse or misread, and combinations it cannot run. Options that do not apply
+    are not checked (they are not written)."""
+    ctx, problems = option_context(software, comp_type, settings), []
+    for o in OPTIONS:
+        raw = str((settings or {}).get(o.section, {}).get(o.key, "")).strip()
+        if raw and applies(o, ctx):
+            try: option_value(o, raw)
+            except ValueError as exc: problems.append(str(exc))
+    def given(key): return any(str((settings or {}).get(o.section, {}).get(key, "")).strip() for o in OPTIONS if o.key == key)
+    if ctx["job_setup"] == "findiff" and (software != "qe" or comp_type != "scf"):
+        problems.append("Finite differences (job_setup = 'findiff') need Quantum ESPRESSO with computation type 'scf', on a periodic source.")
+    if software == "g16" and ctx["is_grimme"] is True and ctx["grimme_type"] in ("d3m", "d3mbj"):
+        problems.append(f"Gaussian has no '{ctx['grimme_type']}' dispersion: use d2, d3 or d3bj.")
+    if software == "g16" and comp_type == "opt" and ctx["loose_opt"] is True and ctx["tight_opt"] is True and given("loose_opt") and given("tight_opt"):
+        problems.append("Loose and tight convergence are both on: SCOPE uses loose. Choose one.")
+    for key in ("time_limit", "max_jobs", "max_procs", "max_steps", "td_nstates", "recalc_steps", "elec_maxstep", "opt_maxstep", "mix_ndim", "bfgs_ndim"):
+        if given(key) and isinstance(ctx[key], int) and ctx[key] <= 0 and applies(next(o for o in OPTIONS if o.key == key), ctx):
+            problems.append(f"{next(o.label for o in OPTIONS if o.key == key)} ({key}) must be at least 1.")
+    return problems
+
 def parse_sections(text: str) -> dict:
     """Reads the raw `key = value` pairs of each &section of an input file, keeping order and the value text as written.
 
@@ -384,14 +557,16 @@ def split_names(text: str) -> list:
     return [n for n in re.split(r"[,\s]+", text.strip()) if n]
 
 def build_sections(branch: str, workflow: str, job: str, requisites: str, constrains: str, software: str, comp_type: str, functional: str, basis: str, procs: int, want_submit: bool, queue: str="", extras: dict=None,
-                   istate: str="", fstate: str="") -> dict:
+                   istate: str="", fstate: str="", settings: dict=None) -> dict:
     """Builds the four sections from the form values.
 
     workflow, requisites and constrains accept several names separated by commas or spaces (one name stays a plain
     string, several become a list). basis is written only for Gaussian 16. want_submit is always written, because
     SCOPE assumes True when it is missing. istate and fstate are written when given (SCOPE's defaults are 'initial' and
-    the job name). extras maps a section to raw `key = value` text; those keys are added after the form keys and
-    replace them if they repeat one.
+    the job name). settings maps a section to {key: value as written} for the option fields (OPTIONS): an empty value is
+    not written (SCOPE's default), and neither is an option that does not apply (for instance a Gaussian setting once the
+    software is Quantum ESPRESSO). extras maps a section to raw `key = value` text; those keys are added after the form
+    keys and replace them if they repeat one.
     """
     names, req, con = split_names(workflow), split_names(requisites), split_names(constrains) or ["self"]
     states = {k: py_value(v.strip()) for k, v in (("istate", istate), ("fstate", fstate)) if v and v.strip()}
@@ -403,6 +578,10 @@ def build_sections(branch: str, workflow: str, job: str, requisites: str, constr
     }
     if queue.strip(): sections["environment"]["queue"] = py_value(queue.strip())
     if software == "g16" and basis.strip(): sections["qc_data"]["basis"] = py_value(basis.strip())
+    ctx = option_context(software, comp_type, settings)
+    for o in OPTIONS:
+        raw = str((settings or {}).get(o.section, {}).get(o.key, "")).strip()
+        if raw and applies(o, ctx): sections[o.section][o.key] = raw
     for name, text in (extras or {}).items():
         for key, value in parse_sections(f"&{name}\n{text}\n/").get(name, {}).items(): sections[name][key] = value
     return sections
@@ -415,6 +594,9 @@ def _literal(raw: str):
 def sections_to_form(sections: dict) -> tuple:
     """Maps the sections of an existing file to the form fields; every key the form has no field for goes to extras.
 
+    An option of OPTIONS gets its field (form['settings'], value kept as written) when it applies to this file and its value is one
+    the field can show; otherwise it stays in extras, so nothing of the file is lost or reinterpreted.
+
     Returns:
         tuple: (form dict with the build_sections arguments, extras dict section -> text).
     """
@@ -425,9 +607,17 @@ def sections_to_form(sections: dict) -> tuple:
              "istate": str(get("job_data", "istate", "")), "fstate": str(get("job_data", "fstate", "")),
              "software": str(get("qc_data", "software", "g16")), "comp_type": str(get("qc_data", "comp_type", "scf")), "functional": str(get("qc_data", "functional", "pbe")), "basis": str(get("qc_data", "basis", "")),
              "procs": int(get("environment", "requested_procs", 4)) if str(get("environment", "requested_procs", 4)).isdigit() else 4, "want_submit": get("options", "want_submit", True) is True, "queue": str(queue)}
+    raw_settings = {name: {k: v for k, v in sections.get(name, {}).items() if (name, k) in OPTION} for name in SECTIONS}
+    ctx, settings = option_context(form["software"], form["comp_type"], raw_settings), {name: {} for name in SECTIONS}
+    for name in SECTIONS:
+        for k, v in raw_settings[name].items():
+            try: option_value(OPTION[(name, k)], v); readable = True
+            except ValueError: readable = False
+            if readable and applies(OPTION[(name, k)], ctx): settings[name][k] = v
+    form["settings"] = settings
     extras = {}
     for name in SECTIONS:
-        lines = [f"{k} = {v}" for k, v in sections.get(name, {}).items() if k not in FORM_KEYS[name] and not (name == "job_data" and k == "hierarchy" and v == "1")]
+        lines = [f"{k} = {v}" for k, v in sections.get(name, {}).items() if k not in FORM_KEYS[name] and k not in settings[name] and not (name == "job_data" and k == "hierarchy" and v == "1")]
         extras[name] = "\n".join(lines)
     return form, extras
 
@@ -445,7 +635,7 @@ def followup_form(report: "InputReport", reports: list=()) -> tuple:
     taken = {r.job for r in reports if r.ok and r.branch == report.branch}
     name = kind if kind not in taken else next(f"{kind}{i}" for i in range(2, 1000) if f"{kind}{i}" not in taken)
     form.update(job=name, comp_type=kind, requisites=report.job, constrains="self", istate="", fstate="")
-    extras["job_data"] = ""
+    extras["job_data"] = ""; form["settings"]["job_data"] = {}
     return form, extras
 
 @dataclass
@@ -555,6 +745,7 @@ def validate_form(**values) -> tuple:
     """
     text = render_sections(build_sections(**values))
     problems = form_problems(values["branch"], values["job"], values["workflow"], values["procs"], values.get("requisites", ""))
+    problems += option_problems(values["software"], values["comp_type"], values.get("settings"))
     return text, read_input_text(text), problems
 
 def related(r: InputReport, name: str, reports: list, sources: "list | None"=None) -> list:

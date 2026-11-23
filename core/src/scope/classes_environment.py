@@ -169,23 +169,31 @@ class Environment(object):
             None
         """
         ## Function to digest the queue names assuming that the user could use strange formats
+        ## Each requested name selects ONE queue: the one with that exact name, else the one with that alias (alter_name).
+        ## Only when neither exists is a similar name offered; accepting it selects that queue without renaming it.
         list_of_user_q = line.strip().split(",")
         if debug > 0: print(f"ENV.READ_USER_QUEUE_LIST: received {list_of_user_q}")
         for user_q in list_of_user_q:
             if debug > 0: print(f"ENV.READ_USER_QUEUE_LIST: trying to make '{user_q}' available. Searching in list of env.available_queues")
             user_q = user_q.strip()
+            if not user_q: continue
+            q = match_queue(self.available_queues, user_q)
+            if q is not None:
+                q.select_queue()
+                continue
             found = False
             for q in self.available_queues:
-                if q.name == user_q or q.alter_name == user_q:
-                    q.select_queue()
-                    found = True
-                elif user_q in q.name or q.name in user_q:
+                if user_q in q.name or q.name in user_q:
+                    if not interactive():                                  ## a run without a terminal (GUI, batch): nobody can answer
+                        print(f"ENV.READ_USER_QUEUE_LIST: requested queue '{user_q}' is not a queue of this environment (a similar one is '{q.name}'); not selected")
+                        found = True
+                        break
                     message = f"Found Similar queue as the one you requested. Is {q.name} your selection: {user_q} Y/N "
                     tmp = read_user_input(message=message, rtext_options=["Y", "N", "y", "n"])
                     if tmp == "Y" or tmp == 'y':
-                        q.select_queue(debug=debug)
-                        q.alter_name = user_q
+                        q.select_queue()                                   ## Queue.select_queue takes no debug argument
                         found = True
+                        break
             if not found: print(f"ENV.READ_USER_QUEUE_LIST: requested queue '{user_q}' was not found")
 
     ######
@@ -279,11 +287,10 @@ class Environment(object):
                 if q.name == new_queue.name: q += new_queue
 
     def find_queue(self, queue_name: str):
-        if not hasattr(self,"mqueues"): raise ValueError(f"Queues have not been initialized for this environment. Run self.get_mqueues()") 
-        for q in self.mqueues:
-            if q.name == queue_name or q.alter_name == queue_name:
-                return True, q
-        return False, None
+        """(True, queue) for the queue named queue_name (an exact name wins over another queue's alias), else (False, None)."""
+        if not hasattr(self,"mqueues"): raise ValueError(f"Queues have not been initialized for this environment. Run self.get_mqueues()")
+        q = match_queue(self.mqueues, queue_name)
+        return (q is not None), q
 
     def make_queue_available(self, queue_name: str):
         found, q = self.find_queue(queue_name)
@@ -611,25 +618,24 @@ class Environment(object):
             else:                             correct = False
 
         if correct:
+            allowed = slurm_user_partitions(self) if self.scheduler == "slurm" else None
             for uq in user_q:
-                found = False
-                for mq in self.mqueues:
-                    if uq == mq.name or uq == mq.alter_name and not found: 
-                        found = True
-                        if mq.name not in list(aq.name for aq in self.available_queues):   ## maybe .alter_name should also be checked 
-                            mq.set_nodes()
-                            self.available_queues.append(mq)
-
-                    elif uq in mq.name or mq.name in uq and not found:
-                        message = f"\tI found a similar queue as the one you requested. Is {mq.name} your selection: {uq}? Y/N "
-                        tmp = read_user_input(message=message, rtext_options=["Y", "N", "y", "n"])
-                        if tmp == "Y" or tmp == 'y':
-                            found = True
-                            if mq.name not in list(aq.name for aq in self.available_queues):   ## maybe .alter_name should also be checked 
-                                mq.set_nodes()
-                                mq.alter_name = uq
-                                self.available_queues.append(mq)
-                if not found: print(f"SET_QUEUES: could not find {uq} in the system queues")
+                ## The queue with that exact name, else the one with that alias; a similar name only when neither exists.
+                ## Accepting a similar name never renames the queue's alias (it would later match the typed name too).
+                chosen = match_queue(self.mqueues, uq)
+                if chosen is None:
+                    for mq in self.mqueues:
+                        if (uq in mq.name or mq.name in uq):
+                            message = f"\tI found a similar queue as the one you requested. Is {mq.name} your selection: {uq}? Y/N "
+                            tmp = read_user_input(message=message, rtext_options=["Y", "N", "y", "n"])
+                            if tmp == "Y" or tmp == 'y': chosen = mq; break
+                if chosen is None: print(f"SET_QUEUES: could not find {uq} in the system queues"); continue
+                if allowed is not None and chosen.name not in allowed:
+                    print(f"SET_QUEUES: skipping {chosen.name}: your Slurm account cannot submit to it (sacctmgr lists: {', '.join(sorted(allowed))})")
+                    continue
+                if chosen.name not in list(aq.name for aq in self.available_queues):
+                    chosen.set_nodes()
+                    self.available_queues.append(chosen)
         else:
             print(f"SET_QUEUES: You said the interpreted queues are not correct. Please restart function to repeat the process")
             return self.available_queues
@@ -661,6 +667,21 @@ class Environment(object):
                 for q in self.available_queues:
                     q.set_priority(prio=int(1))
             return self.available_queues
+
+    def set_fallback_time_limit(self, debug: int=0):
+        """Asks for the wall time (minutes) to request when neither the input (time_limit in &environment) nor the
+        queue gives one: a Slurm partition with MaxTime=UNLIMITED and no DefaultTime. Enter keeps none."""
+        if getattr(self, "scheduler", "local") != "slurm" or not interactive(): return getattr(self, "fallback_time_limit", None)   ## no terminal: keep what is set
+        unlimited = [q.name for q in getattr(self, "available_queues", []) if getattr(q, "time_limit", None) is None and getattr(q, "default_time_limit", None) is None]
+        print("")
+        print(f"\t---------------------------------------------------------------------------------------- ")
+        print(f"\t Fallback Wall Time")
+        print(f"\t---------------------------------------------------------------------------------------- ")
+        if unlimited: print(f"\tThese queues have no maximum and no default wall time: {', '.join(unlimited)}. Some clusters refuse jobs without one.")
+        print(f"\tWall time in minutes requested when the input sets no time_limit and the queue gives none (e.g. 1440).")
+        value = read_user_input(message="\tMinutes, or Enter for none: ", rtype_options=[int], validator=lambda v: v > 0, default="none")
+        self.fallback_time_limit = None if value == "none" else int(value)
+        return self.fallback_time_limit
 
 ###############
 ###  Paths  ###
@@ -882,6 +903,7 @@ class Environment(object):
             to_print += f'\n'
         to_print += f'\tScheduler                = {self.scheduler}\n'
         if hasattr(self,"method"):     to_print += f'\tQueue Selection Method   = {self.method}\n'
+        if getattr(self,"fallback_time_limit",None) is not None: to_print += f'\tFallback Wall Time (min) = {self.fallback_time_limit}\n'
 
         ## Prints the options added as local environment
         if hasattr(self,"added_attr"):
@@ -947,6 +969,37 @@ def run_command(cmd: str, timeout: int = 10) -> CommandResult:
         return CommandResult(cmd, -2, "", "Command timed out")
     except FileNotFoundError as e:
         return CommandResult(cmd, -1, "", str(e))
+
+####
+def match_queue(queues: list, name: str):
+    """The queue of `queues` called `name`: the one with that exact name wins, else the first whose alias (alter_name) is `name`.
+    None when neither exists. Exact names first, because an alias can repeat another queue's name (res_std with alias 'std')."""
+    name = (name or "").strip()
+    if not name: return None
+    for q in queues:
+        if q.name == name: return q
+    for q in queues:
+        if getattr(q, "alter_name", None) == name: return q
+    return None
+
+def interactive() -> bool:
+    """True when someone can answer a question (stdin is a terminal); False in GUI or batch runs, where input() would fail."""
+    import sys
+    try: return sys.stdin is not None and sys.stdin.isatty()
+    except (AttributeError, ValueError): return False
+
+def slurm_user_partitions(env: object=None) -> "set | None":
+    """The Slurm partitions the user's account can submit to, from `sacctmgr show assoc`.
+    None when that cannot be told: sacctmgr missing or failing, no association listed, or an association without a partition
+    (which allows every partition). Then no queue is filtered out."""
+    user = getattr(env, "user", None) or set_user()
+    try:                                                       ## not run_command: its stripped output would hide an empty (= every partition) line
+        done = subprocess.run(["sacctmgr", "-nP", "show", "assoc", f"user={user}", "format=partition"], capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.TimeoutExpired): return None
+    if done.returncode != 0: return None
+    lines = [l.strip() for l in done.stdout.splitlines()]
+    if not lines or any(l == "" for l in lines): return None
+    return set(lines)
 
 #############
 ### OTHER ###

@@ -76,6 +76,23 @@ def get_attempt_number(comp: object, origin: str, debug: int=0) -> int:
     return attempt_number
 
 
+def get_slurm_time_limit(queue: object, debug: int=0) -> int | str | None:
+    """The wall time (minutes, or a Slurm time string) to request with #SBATCH --time for a job on `queue`.
+
+    In order: the input's time_limit (&environment), the partition's MaxTime, its DefaultTime, then the
+    Environment's fallback_time_limit. A partition with MaxTime=UNLIMITED and no DefaultTime gives neither,
+    and some clusters then refuse any job without --time; fallback_time_limit covers that case. None when
+    none is known: a warning is printed and no --time is written.
+    """
+    env = queue._environment
+    for value in (getattr(env,'time_limit',None), getattr(queue,'time_limit',None),
+                  getattr(queue,'default_time_limit',None), getattr(env,'fallback_time_limit',None)):
+        if value is not None and value != 'none': return value
+    print(f"GEN_SUBFILE: WARNING: no wall time known for queue {queue.name} (its maximum is unlimited and it has no default); "
+          "the scheduler may reject the job. Set time_limit in &environment, or fallback_time_limit in the Environment.")
+    return None
+
+
 def get_slurm_signal_time(time_limit: int | str | None, debug: int=0) -> int:
     """Returns advance-warning seconds for a SLURM wall-time limit.
 

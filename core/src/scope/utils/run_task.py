@@ -5,6 +5,34 @@ from scope.classes_input        import *
 from scope.classes_state        import *
 from scope.classes_system       import *
 from scope.read_write           import load_binary
+from scope.classes_workflow     import SubmissionError
+
+class RunReport(str):
+    """The report of run_task (a str, as before) that also lists the submissions the scheduler refused.
+
+    Attributes:
+        submission_failures (list): (output path, scheduler message) for each computation whose submission failed.
+    """
+    def __new__(cls, text: str="", submission_failures: list=None):
+        obj = super().__new__(cls, text)
+        obj.submission_failures = list(submission_failures or [])
+        return obj
+
+def _one_line(text: str) -> str:
+    return "; ".join(line.strip() for line in str(text).splitlines() if line.strip())
+
+def _submit(comp: object, global_env: object, options: object, failures: list, failed_states: set, debug: int=0) -> str:
+    """Runs comp (which submits it) and returns the report line of a refused submission, or ''."""
+    try:
+        comp.run(global_env, options, debug=debug)
+        return ""
+    except SubmissionError as exc:
+        reason = _one_line(exc.reason)
+        print(f"RUN_TASK: submission failed for {comp.out_path}: {reason}")
+        failures.append((comp.out_path, reason))
+        fstate = getattr(comp.qc_data, 'fstate', None)
+        if fstate: failed_states.add(fstate)
+        return f"Submission failed for {comp.out_path}: {reason}\n"
 
 ######################
 def run_task(sys_path: str, inp_paths: list, global_env: str | object, handle_errors: bool=False, debug: int=0):
@@ -19,15 +47,19 @@ def run_task(sys_path: str, inp_paths: list, global_env: str | object, handle_er
         debug (int):                   Verbosity level.
 
     Returns:
-        str: Report string summarizing unresolved issues that require manual attention.
+        RunReport: Report string summarizing unresolved issues that require manual attention; its
+        submission_failures lists the jobs the scheduler refused.
 
     Stored branches whose computation folder is unavailable are skipped and
     reported once. Their folders and workflow history are not recreated or reset.
     Saves after a task only when System.should_save marks pending changes.
+    A refused submission is reported and the other computations go on; a job
+    whose initial state would come from a refused job is reported as blocked.
     """
 
     report = ''
     unavailable_branches = set()
+    failures, failed_states = [], set()        ## refused submissions; the states their jobs would have written
 
     ##############
     ### HEADER ###
@@ -46,7 +78,7 @@ def run_task(sys_path: str, inp_paths: list, global_env: str | object, handle_er
     ## 0.2-Checks status of branch in system. This is to avoid loading the system if calculations for that branch are already finished
     if not verify_status(sys_path, inp_paths, debug=debug): 
         if debug > 0: print("RUN_TASK: All branches are either terminated or finished. No need to load system")
-        return report 
+        return RunReport(report)
 
     ## 0.3-Loads the System
     sys = load_binary(sys_path)
@@ -209,9 +241,12 @@ def run_task(sys_path: str, inp_paths: list, global_env: str | object, handle_er
                             # A stored completion flag cannot replace the required geometry.
                             if not comp.verify_state(comp.qc_data.istate):
                                 if debug > 0: print(f"RUN_TASK, step 3.2a: initial state '{comp.qc_data.istate}' is missing or lacks geometry")
-                                report += f"Retry pending for {comp.out_path}: initial state '{comp.qc_data.istate}' is missing or lacks geometry.\n"
+                                if comp.qc_data.istate in failed_states:
+                                    report += f"Blocked: {comp.out_path} starts from state '{comp.qc_data.istate}', whose job could not be submitted (see 'Submission failed' above).\n"
+                                else:
+                                    report += f"Retry pending for {comp.out_path}: initial state '{comp.qc_data.istate}' is missing or lacks geometry.\n"
                                 continue
-                            comp.run(global_env, options, debug=debug); sys.should_save = True
+                            report += _submit(comp, global_env, options, failures, failed_states, debug=debug); sys.should_save = True
                     else: 
                         if debug > 0: print("RUN_TASK, step 3.2a: want_submit is False or comp.has_update")
 
@@ -320,7 +355,7 @@ def run_task(sys_path: str, inp_paths: list, global_env: str | object, handle_er
                                 comp.isfinished   = False
                                 comp.isgood       = False
                                 if options.want_submit and comp.verify_state(comp.qc_data.istate):
-                                    comp.run(global_env, options, debug=debug)
+                                    report += _submit(comp, global_env, options, failures, failed_states, debug=debug)
                                     if debug > 0: print(f"RUN_TASK: Same-run retry passed to submission logic: {comp.out_path}")
                                 elif options.want_submit:
                                     report += f"Retry pending for {comp.out_path}: initial state '{comp.qc_data.istate}' is missing or lacks geometry.\n"
@@ -342,7 +377,7 @@ def run_task(sys_path: str, inp_paths: list, global_env: str | object, handle_er
         if getattr(sys,'should_save',False):
             if debug > 0: print(f"Saving System {sys.name} to {sys.system_file}")
             sys.save()
-    return report
+    return RunReport(report, failures)
 
 #######################
 ## Related Functions ##

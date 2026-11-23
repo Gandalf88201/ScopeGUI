@@ -46,6 +46,7 @@ class RunRow:
 def ended_text(code: "int | None") -> str:
     """State text of a run that is no longer running, from the exit code its wrapper wrote (None: it wrote none)."""
     if code is None: return "ended without finishing"
+    if code == remote.EXIT_REFUSED: return f"jobs refused by the scheduler (exit {code})"
     return "stopped" if code in (-15, 143) else f"finished (exit {code})"
 
 def workspace_of(record: dict, spaces: list) -> str:

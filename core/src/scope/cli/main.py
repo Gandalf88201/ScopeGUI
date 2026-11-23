@@ -18,4 +18,5 @@ def main():
     gui_parser(subparsers)
 
     args = parser.parse_args()
-    args.func(args)
+    code = args.func(args)                  ## the console script exits with main()'s value: `scope run` returns non-zero when a job was refused
+    return code if type(code) is int else 0
