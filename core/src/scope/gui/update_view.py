@@ -22,7 +22,7 @@ class UpdatesDialog(QDialog):
         self.message = QLabel(); self.message.setWordWrap(True); self.message.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self.check_btn, self.update_btn, self.restart_btn, close = QPushButton("Check now"), QPushButton("Update"), QPushButton("Restart the window"), QPushButton("Close")
         self.update_btn.setProperty("primary", True); self.restart_btn.setProperty("primary", True); self.restart_btn.hide()
-        self.update_btn.setToolTip("Moves this copy forward to the main branch on GitHub (git merge --ff-only). Only offered when no local change or commit would be affected.")
+        self.update_btn.setToolTip("Moves this copy forward to the main branch on GitHub (git merge --ff-only). Uncommitted changes are set aside and put back; offered only when they do not overlap the new commits and no local commit would be affected.")
         self.restart_btn.setToolTip("Closes this window and opens it again with the new code. Runs keep going: they do not depend on the window.")
         row = QHBoxLayout(); row.addWidget(self.check_btn); row.addStretch(1); row.addWidget(close); row.addWidget(self.restart_btn); row.addWidget(self.update_btn)
         lay = QVBoxLayout(self); lay.addWidget(self.head); lay.addWidget(self.auto); lay.addWidget(self.log, 1); lay.addWidget(self.message); lay.addLayout(row)
@@ -45,7 +45,9 @@ class UpdatesDialog(QDialog):
         st = self.window_.update_status
         if not st or not st.can_update(): return
         t = st.followed()
-        if QMessageBox.question(self, "Update SCOPE", f"Move '{st.branch}' forward by {t.behind} commit(s) to {t.ref}?\n\nNo local change is touched (there is none), and runs keep going. The new code is used after the window restarts.") != QMessageBox.Yes: return
+        local = (f"Your uncommitted changes ({len(st.changed)} file(s)) are set aside during the update and put back right after (git stash); none of them overlaps the new commits."
+                 if st.dirty else "There is no local change to keep.")
+        if QMessageBox.question(self, "Update SCOPE", f"Move '{st.branch}' forward by {t.behind} commit(s) to {t.ref}?\n\n{local} Runs keep going. The new code is used after the window restarts.") != QMessageBox.Yes: return
         self.window_.apply_update()
 
     def refresh(self) -> None:

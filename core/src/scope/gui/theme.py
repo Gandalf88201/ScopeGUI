@@ -5,13 +5,15 @@ role, including the Disabled group) plus a stylesheet for the modern look. Colou
 the code that draws by hand (the pipeline graph, status labels) asks `colors()` instead of hard-coding values and
 is redrawn when the theme changes.
 """
+import os
+import tempfile
 from PySide6.QtCore    import Qt
 from PySide6.QtGui     import QColor, QGuiApplication, QPalette
 from PySide6.QtWidgets import QApplication
 
-LIGHT = {"window": "#f4f6f8", "base": "#ffffff", "alt": "#edf0f4", "text": "#1f2933", "sub": "#5c6773", "accent": "#2f6fed", "accent_text": "#ffffff", "border": "#d3d9e0", "sidebar": "#1f2a37", "sidebar_text": "#e6ebf1", "sidebar_sub": "#93a1b1",
+LIGHT = {"window": "#f4f6f8", "base": "#ffffff", "alt": "#edf0f4", "text": "#1f2933", "sub": "#5c6773", "accent": "#2f6fed", "accent_text": "#ffffff", "border": "#d3d9e0", "control": "#8d98a5", "sidebar": "#1f2a37", "sidebar_text": "#e6ebf1", "sidebar_sub": "#93a1b1",
          "ok": "#1e8449", "warn": "#b9650e", "err": "#c0392b", "node": "#d6eaf8", "node_text": "#1b2631", "node_missing": "#fdebd0", "edge": "#34495e", "constrain": "#c0392b", "highlight": "#cfe0ff"}
-DARK  = {"window": "#1e232a", "base": "#161a20", "alt": "#272d36", "text": "#e6e9ed", "sub": "#9aa5b1", "accent": "#5b9dff", "accent_text": "#0d1117", "border": "#38414d", "sidebar": "#12161c", "sidebar_text": "#e6ebf1", "sidebar_sub": "#7f8b99",
+DARK  = {"window": "#1e232a", "base": "#161a20", "alt": "#272d36", "text": "#e6e9ed", "sub": "#9aa5b1", "accent": "#5b9dff", "accent_text": "#0d1117", "border": "#38414d", "control": "#7b8794", "sidebar": "#12161c", "sidebar_text": "#e6ebf1", "sidebar_sub": "#7f8b99",
          "ok": "#4cd08a", "warn": "#f0b35a", "err": "#ff7a6e", "node": "#cfe3f7", "node_text": "#1b2631", "node_missing": "#f6d9b4", "edge": "#d5dbdb", "constrain": "#ff7a6e", "highlight": "#2c4a7c"}
 
 _state     = {"mode": "light", "pref": "auto", "listeners": []}
@@ -47,8 +49,45 @@ def palette(c: dict) -> QPalette:
         p.setColor(QPalette.Disabled, role, QColor(c["sub"]) if role in (QPalette.WindowText, QPalette.Text, QPalette.ButtonText) else QColor(value))
     return p
 
-def stylesheet(c: dict) -> str:
+ICONS = {                                                                   ## drawn on the accent colour (tick) or on the field colour (dot)
+    "check": '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16"><path d="M3.6 8.3l2.9 2.9 5.9-6.2" fill="none" stroke="{fg}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+    "dash":  '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16"><path d="M4 8h8" stroke="{fg}" stroke-width="2" stroke-linecap="round"/></svg>',
+    "dot":   '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16"><circle cx="8" cy="8" r="3.6" fill="{fg}"/></svg>'}
+
+def icons(c: dict) -> dict:
+    """Writes the tick, dash and dot of the check boxes and option buttons in this theme's colours (enabled and disabled) and returns
+    {name: path with forward slashes}. A stylesheet that draws the box itself needs its marks as files; they are tiny and rewritten
+    when missing, in a folder of the user's temporary directory."""
+    folder = os.path.join(tempfile.gettempdir(), f"scope-gui-icons-{getattr(os, 'getuid', lambda: 0)()}"); out = {}
+    for name, svg in ICONS.items():
+        for state, fg in (("", c["accent"] if name == "dot" else c["accent_text"]), ("_off", c["sub"])):
+            path = os.path.join(folder, f"{name}{state}_{fg.lstrip('#')}.svg")
+            try:
+                if not os.path.exists(path): os.makedirs(folder, exist_ok=True); open(path, "w").write(svg.format(fg=fg))
+            except OSError: pass
+            out[name + state] = path.replace(os.sep, "/")
+    return out
+
+def indicators(c: dict) -> str:
+    """Check boxes and option buttons drawn by the stylesheet: Fusion draws their outline from the window colour made darker, which is
+    nearly invisible on the dark theme."""
+    i = icons(c)
     return f"""
+    QCheckBox::indicator, QRadioButton::indicator, QAbstractItemView::indicator {{ width: 14px; height: 14px; border: 1px solid {c['control']}; background: {c['base']}; }}
+    QCheckBox::indicator, QAbstractItemView::indicator {{ border-radius: 4px; }}
+    QRadioButton::indicator {{ border-radius: 8px; }}
+    QCheckBox::indicator:hover, QRadioButton::indicator:hover, QAbstractItemView::indicator:hover {{ border-color: {c['accent']}; }}
+    QCheckBox::indicator:checked, QAbstractItemView::indicator:checked {{ background: {c['accent']}; border-color: {c['accent']}; image: url({i['check']}); }}
+    QCheckBox::indicator:indeterminate, QAbstractItemView::indicator:indeterminate {{ background: {c['accent']}; border-color: {c['accent']}; image: url({i['dash']}); }}
+    QRadioButton::indicator:checked {{ border-color: {c['accent']}; image: url({i['dot']}); }}
+    QCheckBox::indicator:disabled, QRadioButton::indicator:disabled, QAbstractItemView::indicator:disabled {{ background: {c['alt']}; border-color: {c['border']}; }}
+    QCheckBox::indicator:checked:disabled, QAbstractItemView::indicator:checked:disabled {{ background: {c['border']}; border-color: {c['border']}; image: url({i['check_off']}); }}
+    QRadioButton::indicator:checked:disabled {{ image: url({i['dot_off']}); }}
+    QCheckBox, QRadioButton {{ spacing: 8px; }}
+    """
+
+def stylesheet(c: dict) -> str:
+    return indicators(c) + f"""
     QWidget {{ font-size: 13px; }}
     QMainWindow, QDialog {{ background: {c['window']}; }}
     QToolTip {{ background: {c['base']}; color: {c['text']}; border: 1px solid {c['border']}; padding: 4px; }}
@@ -65,7 +104,6 @@ def stylesheet(c: dict) -> str:
     QTabWidget::pane {{ border: 1px solid {c['border']}; border-radius: 6px; background: {c['window']}; }}
     QTabBar::tab {{ background: transparent; color: {c['sub']}; padding: 6px 12px; border-bottom: 2px solid transparent; }}
     QTabBar::tab:selected {{ color: {c['text']}; border-bottom: 2px solid {c['accent']}; }}
-    QCheckBox {{ spacing: 8px; }}
     QSplitter::handle {{ background: {c['border']}; }}
     QScrollBar:vertical {{ background: transparent; width: 10px; margin: 0; }}
     QScrollBar::handle:vertical {{ background: {c['border']}; border-radius: 5px; min-height: 30px; }}

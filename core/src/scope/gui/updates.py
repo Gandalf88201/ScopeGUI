@@ -7,14 +7,18 @@ GitHub. Two operations, kept apart:
   from there, whatever branch is checked out), and the main branch of the main remote when it is another one.
   A fetch only updates git's record of what GitHub holds; the files of SCOPE are not changed. It never asks for a password: a
   remote that needs one makes the check fail with a message instead.
-- update: `git merge --ff-only` of that main branch into the current branch, only when nothing here would be lost or mixed: no uncommitted changes to
-  tracked files and no local commits that the branch on GitHub lacks. Anything else is left to the user, with an explanation.
+- update: `git merge --ff-only` of that main branch into the current branch, only when nothing here would be lost or mixed: no local
+  commits that the branch on GitHub lacks, and uncommitted changes (to tracked files) only if they apply cleanly on top of the new code.
+  Those are put aside with `git stash` for the update and put back right after; whether they apply is checked first, on a scratch
+  index, without touching any file. Anything else is left to the user, with an explanation that names the files.
 
 The check runs only once the user has allowed it (or when they press Check now); its setting and the time of the last check are
 kept in the GUI preferences under 'update_check'.
 """
 import os
+import re
 import subprocess
+import tempfile
 import time
 from dataclasses import dataclass, field
 
@@ -22,12 +26,13 @@ DAY        = 24 * 3600
 CONFIG_KEY = "update_check"
 MAX_LOG    = 30                                                             ## commits listed in the details
 
-def git(repo: str, *args, timeout: int=30) -> tuple:
-    """Runs git in `repo` without any prompt (no password, no editor). Returns (returncode, stdout, stderr); git missing gives (-1, '', message)."""
-    env = dict(os.environ, GIT_TERMINAL_PROMPT="0", GIT_ASKPASS="echo", SSH_ASKPASS="echo", GIT_SSH_COMMAND="ssh -o BatchMode=yes", LC_ALL="C", GIT_EDITOR="true")
+def git(repo: str, *args, timeout: int=30, input: str=None, env: dict=None, raw: bool=False) -> tuple:
+    """Runs git in `repo` without any prompt (no password, no editor). Returns (returncode, stdout, stderr); git missing gives (-1, '', message).
+    `input` is sent on stdin, `env` adds environment variables, and raw=True keeps stdout exactly as git wrote it (a patch needs its last newline)."""
+    env = dict(os.environ, GIT_TERMINAL_PROMPT="0", GIT_ASKPASS="echo", SSH_ASKPASS="echo", GIT_SSH_COMMAND="ssh -o BatchMode=yes", LC_ALL="C", GIT_EDITOR="true", **(env or {}))
     try:
-        done = subprocess.run(["git", "-C", repo, *args], capture_output=True, text=True, timeout=timeout, env=env, stdin=subprocess.DEVNULL)
-        return done.returncode, done.stdout.strip(), done.stderr.strip()
+        done = subprocess.run(["git", "-C", repo, *args], capture_output=True, text=True, timeout=timeout, env=env, input=input, stdin=None if input is not None else subprocess.DEVNULL)
+        return done.returncode, done.stdout if raw else done.stdout.strip(), done.stderr.strip()
     except subprocess.TimeoutExpired: return -2, "", f"git {args[0]} did not answer within {timeout} s"
     except OSError as exc: return -1, "", f"git could not be started ({exc})"
 
@@ -69,6 +74,27 @@ def targets(repo: str) -> list:
     if main and remote_main(repo, main) not in out: out.append(remote_main(repo, main))
     return out
 
+def changed_files(repo: str) -> list:
+    """Tracked files with uncommitted changes (staged or not)."""
+    code, out, _ = git(repo, "diff", "--name-only", "HEAD", timeout=30)
+    return out.splitlines() if code == 0 else []
+
+def clashes(repo: str, ref: str) -> list:
+    """The files whose uncommitted changes would not apply on top of `ref`, so the update could not put them back: [] when all of them
+    apply (or there are none). Checked with `git apply --check` on a scratch index that holds `ref`; no file of the checkout is touched.
+    When the check itself cannot run, every changed file is returned (the safe answer)."""
+    files = changed_files(repo)
+    if not files: return []
+    code, patch, _ = git(repo, "diff", "HEAD", "--binary", timeout=60, raw=True)
+    if code != 0: return files
+    with tempfile.TemporaryDirectory(prefix="scope-update-") as tmp:
+        scratch = {"GIT_INDEX_FILE": os.path.join(tmp, "index")}
+        if git(repo, "read-tree", ref, timeout=60, env=scratch)[0] != 0: return files
+        code, _, err = git(repo, "apply", "--cached", "--check", "-", timeout=60, input=patch, env=scratch)
+    if code == 0: return []
+    named = re.findall(r"^error: (?:patch failed: )?(.+?)(?::\d+|: patch does not apply|: does not exist in index|: already exists in index)$", err, re.M)
+    return [f for f in dict.fromkeys(named) if f in files] or files
+
 @dataclass
 class Target:
     """One remote branch compared with this copy.
@@ -97,6 +123,8 @@ class UpdateStatus:
         branch (str):   The current branch ('' when no branch is checked out).
         head (str), date (str): The current commit (short hash) and its date.
         dirty (bool):   Uncommitted changes to files git tracks.
+        changed (list): Those files.
+        clashes (list): Those of them whose changes would not apply on top of the new code (see clashes()); set when there is an update.
         targets (list): Target rows.
         fetched (bool): Whether this status follows a fetch (otherwise it uses what the last fetch brought).
         error (str):    Why the check could not be completed ('' if it was).
@@ -107,6 +135,8 @@ class UpdateStatus:
     head:    str   = ""
     date:    str   = ""
     dirty:   bool  = False
+    changed: list  = field(default_factory=list)
+    clashes: list  = field(default_factory=list)
     targets: list  = field(default_factory=list)
     fetched: bool  = False
     error:   str   = ""
@@ -117,7 +147,7 @@ class UpdateStatus:
 
     def can_update(self) -> bool:
         t = self.followed()
-        return bool(self.branch and t and t.exists and t.behind and not t.ahead and not self.dirty)
+        return bool(self.branch and t and t.exists and t.behind and not t.ahead and not self.clashes)
 
     def blocker(self) -> str:
         """Why Update cannot be applied here ('' if it can, or if there is nothing to apply)."""
@@ -127,7 +157,10 @@ class UpdateStatus:
         if t is None:       return "This copy has no remote repository on GitHub (no 'origin'), so there is nothing to update it from."
         if not t.behind:    return ""
         if t.ahead:         return f"'{self.branch}' has {t.ahead} commit(s) of its own that {t.ref} lacks, so it cannot simply move forward. Bring the new commits in with git (git merge {t.ref}, or git rebase {t.ref})."
-        if self.dirty:      return "There are uncommitted changes in the SCOPE folder. Commit or stash them first (git stash), then update."
+        if self.clashes:
+            names = ", ".join(os.path.relpath(f, "core/src/scope") if f.startswith("core/src/scope/") else f for f in self.clashes[:6]) + (f" and {len(self.clashes) - 6} more" if len(self.clashes) > 6 else "")
+            return (f"Uncommitted changes here overlap the new commits in {names}, so the update could not put them back on its own. "
+                    "Commit them first (or set them aside with git stash), then update; afterwards, git stash pop brings them back and shows what to reconcile.")
         return ""
 
     def summary(self) -> tuple:
@@ -148,6 +181,7 @@ def status(repo: str=None, fetch: bool=True) -> UpdateStatus:
         _, st.branch, _ = git(st.repo, "symbolic-ref", "--short", "-q", "HEAD", timeout=10)
         _, head, _ = git(st.repo, "log", "-1", "--format=%h %cs", timeout=10); st.head, st.date = (head.split() + ["", ""])[:2]
         code, porcelain, _ = git(st.repo, "status", "--porcelain", "--untracked-files=no", timeout=30); st.dirty = code == 0 and bool(porcelain)
+        st.changed = changed_files(st.repo) if st.dirty else []
         refs = targets(st.repo); src = source(st.repo)
         if fetch:
             errors = []
@@ -163,23 +197,40 @@ def status(repo: str=None, fetch: bool=True) -> UpdateStatus:
                 if code == 0 and len(counts.split()) == 2: t.ahead, t.behind = (int(x) for x in counts.split())
                 if t.behind: t.new = git(st.repo, "log", f"--max-count={MAX_LOG}", "--format=%h %cs %s", f"HEAD..{ref}", timeout=30)[1].splitlines()
             st.targets.append(t)
+        t = st.followed()
+        if st.dirty and t and t.exists and t.behind and not t.ahead: st.clashes = clashes(st.repo, t.ref)
     except Exception as exc:
         st.error = f"{type(exc).__name__}: {exc}"
     return st
 
 def update(repo: str) -> tuple:
     """Moves the current branch forward to the main branch updates come from (fast-forward only), after checking again that nothing would be
-    lost. Returns (ok, message, needs_reinstall): needs_reinstall is True when the installation recipe (core/pyproject.toml) changed."""
+    lost. Uncommitted changes (which status() found to apply on top of the new code) are set aside with git stash and put back right after.
+    Returns (ok, message, needs_reinstall): needs_reinstall is True when the installation recipe (core/pyproject.toml) changed."""
     st = status(repo, fetch=False)
     if not st.can_update(): return False, st.blocker() or "There is nothing to update.", False
     t = st.followed()
     code, before, _ = git(repo, "rev-parse", "HEAD", timeout=10)
+    stashed = False
+    if st.dirty:
+        code, out, err = git(repo, "stash", "push", "--quiet", "-m", f"SCOPE GUI: set aside for the update to {t.ref} " + time.strftime("%Y-%m-%d %H:%M"), timeout=120)
+        if code != 0: return False, "git could not set the uncommitted changes aside: " + ((err.splitlines() or [f"exit code {code}"])[-1]), False
+        stashed = True
     code, _, err = git(repo, "merge", "--ff-only", "--quiet", t.ref, timeout=120)
-    if code != 0: return False, "git could not update: " + ((err.splitlines() or [f"exit code {code}"])[-1]), False
+    if code != 0:
+        why = (err.splitlines() or [f"exit code {code}"])[-1]
+        if stashed and git(repo, "stash", "pop", "--quiet", timeout=120)[0] != 0:
+            return False, f"git could not update ({why}), and your uncommitted changes are still set aside: run git stash pop in {repo}.", False
+        return False, "git could not update: " + why, False
+    kept = ""
+    if stashed:
+        code, _, err = git(repo, "stash", "pop", "--quiet", timeout=120)
+        kept = (f" Your uncommitted changes ({len(st.changed)} file(s)) are back in place." if code == 0 else
+                f" Your uncommitted changes could not all be put back ({(err.splitlines() or ['git stash pop failed'])[-1]}); they are kept in the stash: see git stash list in {repo}.")
     _, changed, _ = git(repo, "diff", "--name-only", before, "HEAD", timeout=30)
     recipe = any(name.endswith("pyproject.toml") for name in changed.splitlines())
     _, head, _ = git(repo, "log", "-1", "--format=%h %cs", timeout=10)
-    return True, f"Updated '{st.branch}' by {t.behind} commit(s) to {head}.", recipe
+    return True, f"Updated '{st.branch}' by {t.behind} commit(s) to {head}." + kept, recipe
 
 def setting() -> dict:
     """The 'update_check' preferences: {'enabled': True/False, or missing when the user was not asked yet; 'last': time of the last fetch}."""
