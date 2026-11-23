@@ -204,8 +204,8 @@ def check_job_data(data: object, debug: int=0) -> None:
         - fstate: nonempty string; distinct from istate after name cleanup for 'findiff'.
         - recovery: nonempty string; strategy availability is checked by the software's recovery function.
         - save_wf: False, None, True, 'job' or 'workflow'; string aliases 'none', 'false' and 'true' are also accepted, ignoring case and surrounding spaces.
-        - job_setup: nonempty string, e.g. 'regular', 'rep_opt' or 'findiff'.
-        - max_steps: positive integer for 'rep_opt'.
+        - job_setup: 'regular', 'rep_opt', 'findiff' or 'find_minimum'.
+        - max_steps: positive integer for 'rep_opt' or 'find_minimum'.
         - findiff_displacement: finite positive number for 'findiff', in findiff_units.
         - findiff_units: 'bohr' or 'angstrom' for 'findiff'.
 
@@ -240,9 +240,12 @@ def check_job_data(data: object, debug: int=0) -> None:
     job_setup = getattr(data,'job_setup','regular')
     if not isinstance(job_setup,str) or not job_setup.strip():
         raise ValueError("CHECK_JOB_DATA: job_setup must be a nonempty string")
+    job_setup = job_setup.strip().lower()
+    if job_setup not in ['regular','rep_opt','findiff','find_minimum']:
+        raise ValueError("CHECK_JOB_DATA: job_setup must be 'regular', 'rep_opt', 'findiff' or 'find_minimum'")
 
-    if job_setup == 'rep_opt':
-        # Checks the number of repetitive optimization steps.
+    if job_setup in ['rep_opt','find_minimum']:
+        # Checks the maximum number of optimization steps or minimum-search cycles.
         max_steps = getattr(data,'max_steps',5)
         if isinstance(max_steps,bool) or not isinstance(max_steps,(int,np.integer)) or max_steps <= 0:
             raise ValueError("CHECK_JOB_DATA: max_steps must be a positive integer")
@@ -284,7 +287,8 @@ def fill_environment_data(data: object, debug: int=0):
     """Adds resource defaults and normalizes a parsed 'none' time limit.
 
     Expects data accepted by check_environment_data(); returns the same object.
-    time_limit is in integer minutes; None uses the selected queue's limit.
+    time_limit is in integer minutes. None uses the selected queue's maximum.
+    Unlimited queues use their configured default when available, otherwise 30 days.
     """
     ## Adds defaults to environment data
     if not hasattr(data,"requested_procs"):   data._add_attr("requested_procs",int(1)) 
@@ -309,12 +313,7 @@ def fill_options_data(data: object, debug: int=0):
     return data
 
 def fill_job_data(data: object, debug: int=0):
-    """Adds Job defaults and normalizes names and accepted option aliases.
-
-    Expects data accepted by check_job_data(); returns the same object.
-    recovery defaults to 'standard'. save_wf=True becomes 'job', and None
-    becomes False. Defaults for rep_opt/findiff depend on job_setup.
-    """
+    """Adds Job defaults and normalizes names and accepted option aliases. It expects data accepted by check_job_data()"""
     ## Adds defaults to job_data
     if not hasattr(data,"istate"):        data._add_attr("istate", str("initial"))
     if not hasattr(data,"fstate"):        data._add_attr("fstate", str(data.job))
@@ -325,6 +324,7 @@ def fill_job_data(data: object, debug: int=0):
     if not hasattr(data,"save_wf"):       data._add_attr("save_wf", False)
     if not hasattr(data,"recovery"):      data._add_attr("recovery", "standard")
 
+    data._mod_attr('job_setup',data.job_setup.strip().lower())
     data._mod_attr('recovery',data.recovery.strip().lower())
 
     # None also disables storage of the wavefunction. Input_data reads an unquoted None as the string 'none'.
@@ -339,7 +339,7 @@ def fill_job_data(data: object, debug: int=0):
 
     ## Adds defaults for rep_opt job setup type
     if data.job_setup == 'rep_opt' and not hasattr(data,"energy_thres"): data._add_attr("energy_thres",float(1e-5))
-    if data.job_setup == 'rep_opt' and not hasattr(data,"max_steps"):    data._add_attr("max_steps",int(5))
+    if data.job_setup in ['rep_opt','find_minimum'] and not hasattr(data,"max_steps"): data._add_attr("max_steps",int(5))
     if data.job_setup == 'rep_opt' and not hasattr(data,"energies"):     data._add_attr("energies",np.zeros((data.max_steps)))
 
     # Finite-difference settings; geometry coordinates remain in Angstrom.

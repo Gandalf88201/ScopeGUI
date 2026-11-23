@@ -94,7 +94,7 @@ def run_task_v2(sys_path: str, inp_paths: list, global_env: str | object, handle
             # 1d) Resolves the requested computations
             # Create missing computations without duplicating existing ones.
             # The loop also processes continuations created (and appended) during this invocation.
-            job.set_computations_from_setup(qc_data, debug=max(debug-1,0))
+            report += job.set_computations_from_setup(qc_data, debug=max(debug-1,0)) or ''
             for comp in job.computations:
                 if debug > 0: print(f'RUN_TASK_V2: {system.name}/{branch.name}/{workflow.name}/{job.name}: step {comp.step}, run {comp.run_number}, keyword={comp.keyword!r}')
                 report += process_computation(comp, inp_path, global_env, options, handle_errors=handle_errors, debug=max(debug-1,0))
@@ -156,7 +156,7 @@ def handle_pending_computation(comp: object, environment: object, options: objec
 
     Calls comp.run() for resource selection and submission.
     Skips when submission is disabled or a later run exists. 
-    For rep_opt, preceding steps with the same keyword must have their
+    Preceding steps with the same keyword must have their
     input/output files and be registered and finished. 
     A queued/running attempt waits unless options.ignore_submitted=True. 
 
@@ -165,8 +165,8 @@ def handle_pending_computation(comp: object, environment: object, options: objec
     """
     if not options.want_submit or comp.has_update: return ''
 
-    # For repeated optimizations, check that all previous steps with the same keyword are finished and registered.
-    if comp._job.job_setup == 'rep_opt' and comp.step > 1:
+    # Later steps wait for preceding steps with the same keyword to finish and register.
+    if comp.step > 1:
         previous_steps = {}
         for previous in comp._job.computations:
             if previous.keyword == comp.keyword and previous.step < comp.step:
@@ -197,7 +197,7 @@ def handle_pending_computation(comp: object, environment: object, options: objec
 
 
 def handle_continuation(comp: object, environment: object, options: object, registration_worked: bool, handle_errors: bool=False, debug: int=0) -> str:
-    """Coordinates recovery, repeated optimization and failed-output handling.
+    """Evaluates recovery, optimization continuations and failed-output handling.
 
     Selects SCF recovery when comp.status is no_scf_convergence. Other recovery
     functions check whether they apply and supply their own reports.
@@ -227,8 +227,10 @@ def handle_continuation(comp: object, environment: object, options: object, regi
         continuation_stopped = new_comp is None
     # 2) Optimization recovery
     report += recover_optimization(comp, debug=max(debug-1,0))
-    # 3) Repetitive optimization
+    # 3) Repetitive optimization and minimum searches
     report += continue_rep_opt(comp, registration_worked, debug=max(debug-1,0))
+    if registration_worked and comp._job.job_setup == 'find_minimum':
+        report += comp._job.continue_minimum_search(comp, debug=max(debug-1,0))
     # 4) Failed-output handling
     report += handle_failed_output(comp, environment, options, handle_errors=handle_errors, continuation_stopped=continuation_stopped, registration_worked=registration_worked, debug=max(debug-1,0))
     return report
