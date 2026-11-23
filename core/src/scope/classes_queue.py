@@ -415,26 +415,22 @@ def fix_partition_name(name):
 
 
 def get_submission_time_limit(queue: object) -> int | float | str | None:
-    """Returns the wall time to request for a task, in minutes or the stored scheduler format.
+    """Returns the requested wall time in minutes or the clock string from an older Queue.
 
     Uses the task's time_limit first, then the queue's finite maximum. An
     unlimited queue uses its configured default or 30 days. Returns None when the
     queue limit is unknown and the task supplies none.
     """
-    # Tries to get it from the environment
-    requested = getattr(queue._environment,'time_limit',None)
-    if requested is not None: return requested
+    time_limit = getattr(queue._environment,'time_limit',None)
+    if time_limit is None:
+        time_limit           = getattr(queue,'time_limit',None)
+        raw_limit            = getattr(queue,'time_limit_plain',time_limit)
+        base, _, host_limits = str(raw_limit).partition(',')
+        # For SGE, time_limit includes the shortest finite host override to the base limit.
+        if _queue_time_marker(base) == 'unlimited' and (not host_limits or time_limit is None):
+            time_limit = getattr(queue,'default_time_limit',None) or 30*24*60
 
-    # Otherwise, from the queue
-    time_limit           = getattr(queue,'time_limit',None)
-    raw_limit            = getattr(queue,'time_limit_plain',time_limit)
-    base, _, host_limits = str(raw_limit).partition(',')
-
-    # For SGE, time_limit includes the shortest finite host override to the base limit.
-    if _queue_time_marker(base) == 'unlimited' and (not host_limits or time_limit is None):
-        time_limit = getattr(queue,'default_time_limit',None) or 30*24*60
-
-    # Slurm rounds wall times up to whole minutes, so 90 seconds is written as --time=2.
+    # Slurm grants whole minutes, so a 90-second request is written as 00:02:00.
     if queue._environment.scheduler == 'slurm' and isinstance(time_limit,float):
         return ceil(time_limit)
     return time_limit
