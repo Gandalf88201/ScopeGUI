@@ -28,6 +28,29 @@ epsilon_0           =8.8541878188e-12        ## F/m = C^2⋅s^2/(kg−1⋅m−3)
 bohr2angs       = 0.529177
 angs2bohr       = 1/bohr2angs
 
+# Time units in seconds. A year is 365.25 days.
+TIME_UNITS = {unit: seconds for seconds, names in (
+    (1e-15,    'fs femtosecond femtoseconds'),
+    (1e-12,    'ps picosecond picoseconds'),
+    (1e-9,     'ns nanosecond nanoseconds'),
+    (1e-6,     'us microsecond microseconds'),
+    (1e-3,     'ms millisecond milliseconds'),
+    (1,        's sec secs second seconds'),
+    (60,       'm min mins minute minutes'),
+    (3600,     'h hr hrs hour hours'),
+    (86400,    'd day days'),
+    (604800,   'w wk wks week weeks'),
+    (31557600, 'y yr yrs year years'),
+) for unit in names.split()}
+
+
+def _seconds_per_unit(unit: str) -> float:
+    """Returns the number of seconds in the given time unit."""
+    name = str(unit).strip().casefold().replace('μ','u')
+    if name not in TIME_UNITS: raise ValueError(f'Unknown time unit: {unit!r}')
+    return TIME_UNITS[name]
+
+
 # Energy
 har2kJmol       = 2625.5002
 har2kJ          = 2625.5002

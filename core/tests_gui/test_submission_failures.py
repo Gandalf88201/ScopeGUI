@@ -80,24 +80,21 @@ def write_g16_subfile(tmp_path, env, queue) -> str:
     return (tmp_path / "water_opt.sub").read_text()
 
 def unlimited(env) -> Queue:
-    q = Queue("std", env, time_limit="infinite"); q.time_limit, q.default_time_limit = None, None    # MaxTime=UNLIMITED, DefaultTime=NONE
-    return q
+    return Queue("std", env, time_limit="infinite")                                                 # MaxTime=UNLIMITED, DefaultTime=NONE
 
 def test_an_unlimited_partition_without_default_gets_the_fallback_wall_time(tmp_path):
     env = slurm_env(); env.time_limit = None; env.fallback_time_limit = 1440
-    assert "#SBATCH --time=1440" in write_g16_subfile(tmp_path, env, unlimited(env))
+    assert "#SBATCH --time=1-00:00:00" in write_g16_subfile(tmp_path, env, unlimited(env))
 
-def test_wall_time_order_input_then_queue_maximum_then_queue_default(tmp_path):
-    from scope.utils.core_tools import get_slurm_time_limit
-    env = slurm_env(); env.fallback_time_limit = 1440; q = unlimited(env)
-    q.default_time_limit = 60;  assert get_slurm_time_limit(q) == 60
-    q.time_limit = 4320;        assert get_slurm_time_limit(q) == 4320
-    env.time_limit = 120;       assert "#SBATCH --time=120" in write_g16_subfile(tmp_path, env, q)
-
-def test_no_wall_time_at_all_warns_and_writes_none(tmp_path, capsys):
-    env = slurm_env(); env.time_limit = None
-    text = write_g16_subfile(tmp_path, env, unlimited(env))
-    assert "--time" not in text and "no wall time known for queue std" in capsys.readouterr().out
+def test_wall_time_order_input_then_queue_default_then_fallback_then_30_days(tmp_path):
+    from scope.classes_queue import get_submission_time_limit
+    env = slurm_env(); env.time_limit = None; q = unlimited(env)
+    assert get_submission_time_limit(q) == 30 * 24 * 60                                             # nothing set: SCOPE's own default
+    env.fallback_time_limit = 1440; assert get_submission_time_limit(q) == 1440
+    q.default_time_limit = 60;      assert get_submission_time_limit(q) == 60
+    env.time_limit = 120;           assert "#SBATCH --time=02:00:00" in write_g16_subfile(tmp_path, env, q)
+    finite = Queue("short", env, time_limit="4320"); finite.time_limit = 4320; env.time_limit = None
+    assert get_submission_time_limit(finite) == 4320                                                # a finite maximum wins over the fallback
 
 def test_the_quantum_espresso_job_file_uses_the_same_fallback(tmp_path, monkeypatch):
     from scope.software.quantum_espresso import qe_input
@@ -105,7 +102,7 @@ def test_the_quantum_espresso_job_file_uses_the_same_fallback(tmp_path, monkeypa
     env = slurm_env(); env.time_limit = None; env.fallback_time_limit = 1440
     comp = SimpleNamespace(name="w", path=str(tmp_path), sub_path=str(tmp_path / "w.sub"), inp_name="w.in", out_name="w.out")
     qe_input.gen_qe_subfile(comp, queue=unlimited(env), module="qe")
-    assert "#SBATCH --time=1440" in (tmp_path / "w.sub").read_text()
+    assert "#SBATCH --time=1-00:00:00" in (tmp_path / "w.sub").read_text()
 
 ##################################
 ### C: a refused job is loud ###

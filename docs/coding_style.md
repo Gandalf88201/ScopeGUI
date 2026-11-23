@@ -51,5 +51,6 @@ This document records the coding conventions used in SCOPE source code, tutorial
 - Maintain consistency between labels, coordinates, atoms, connectivity, and parent indices.
 - Preserve bidirectional navigation through the chemistry and workflow hierarchies.
 - Use concise docstrings with `Parameters:`, `Returns:`, `Attributes:`, and `Methods:` sections when useful.
+- Start each function docstring with an overview that applies to the whole function. Include details about one branch when callers need them and the overview gives them context. Put implementation details in comments beside the branch they describe.
 - Write docstrings in the descriptive third-person form: `Creates or reuses...`, `Returns...`, and `Calculates...`. Keep coordinated verbs consistent, for example `Stores results and updates the State`. This applies to summaries and prose describing code behavior; instructions to the reader and code examples retain their natural form.
 - Avoid broad refactors of stable scientific logic unless the task explicitly requires them.

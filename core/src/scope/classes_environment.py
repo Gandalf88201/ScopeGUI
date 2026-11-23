@@ -26,7 +26,7 @@ class Environment(object):
         available_queues (list):        Queues discovered for this environment.
         selected_queues (list):         Queues selected for submission.
         method (str):                   Queue scoring strategy.
-        time_limit (int | None):        Input-specific wall time in minutes; None uses the queue limit.
+        time_limit (int | float | None): Task wall time in minutes, including fractional minutes. None uses the queue limit.
         software_checks (dict):         Most recent static checks of configured software modules.
         qe_launcher (str):              Preferred QE MPI launcher, configurable by the user.
         g16_launcher (str):             Gaussian driver command (normally 'g16').
@@ -669,16 +669,16 @@ class Environment(object):
             return self.available_queues
 
     def set_fallback_time_limit(self, debug: int=0):
-        """Asks for the wall time (minutes) to request when neither the input (time_limit in &environment) nor the
-        queue gives one: a Slurm partition with MaxTime=UNLIMITED and no DefaultTime. Enter keeps none."""
+        """Asks for the wall time (minutes) to request on a Slurm partition with MaxTime=UNLIMITED and no DefaultTime,
+        when the input sets no time_limit (&environment). Enter keeps none: such jobs then ask for 30 days."""
         if getattr(self, "scheduler", "local") != "slurm" or not interactive(): return getattr(self, "fallback_time_limit", None)   ## no terminal: keep what is set
         unlimited = [q.name for q in getattr(self, "available_queues", []) if getattr(q, "time_limit", None) is None and getattr(q, "default_time_limit", None) is None]
         print("")
         print(f"\t---------------------------------------------------------------------------------------- ")
         print(f"\t Fallback Wall Time")
         print(f"\t---------------------------------------------------------------------------------------- ")
-        if unlimited: print(f"\tThese queues have no maximum and no default wall time: {', '.join(unlimited)}. Some clusters refuse jobs without one.")
-        print(f"\tWall time in minutes requested when the input sets no time_limit and the queue gives none (e.g. 1440).")
+        if unlimited: print(f"\tThese queues have no maximum and no default wall time: {', '.join(unlimited)}.")
+        print(f"\tWall time in minutes requested on them when the input sets no time_limit (e.g. 1440). Without one, jobs ask for 30 days.")
         value = read_user_input(message="\tMinutes, or Enter for none: ", rtype_options=[int], validator=lambda v: v > 0, default="none")
         self.fallback_time_limit = None if value == "none" else int(value)
         return self.fallback_time_limit

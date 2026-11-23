@@ -182,7 +182,7 @@ def run_task(sys_path: str, inp_paths: list, global_env: str | object, handle_er
             ############################
             ## 3-Sets the computation(s), meaning that it will check if they exist, and if not, it creates them
             if debug > 0: print(f"RUN_TASK, step 2.4: setting job computations with job_setup={this_job.job_setup}")
-            this_job.set_computations_from_setup(qc_data, debug=debug)
+            report += this_job.set_computations_from_setup(qc_data, debug=debug) or ''
             for jdx, comp in enumerate(this_job.computations):
 
                 #if comp.has_update and comp.isregistered: continue # Skip jobs with update (i.e. with other related computations with higher run_number)
@@ -218,7 +218,7 @@ def run_task(sys_path: str, inp_paths: list, global_env: str | object, handle_er
                     if options.want_submit and not comp.has_update:
 
                         # A saved State can outlive deleted files from earlier steps.
-                        if this_job.job_setup == 'rep_opt' and comp.step > 1:
+                        if comp.step > 1:
                             previous_steps = {}
                             for previous in this_job.computations:
                                 if previous.keyword == comp.keyword and previous.step < comp.step:
@@ -230,7 +230,7 @@ def run_task(sys_path: str, inp_paths: list, global_env: str | object, handle_er
                                 if not previous.input_exists or not previous.output_exists or not previous.isregistered or not getattr(previous,'isfinished',False) or previous.has_update:
                                     waiting_step = previous.step if waiting_step is None else min(waiting_step, previous.step)
                             if waiting_step is not None:
-                                if debug > 0: print(f"RUN_TASK, step 3.2a: waiting for rep_opt step {waiting_step}, keyword={comp.keyword!r}, to finish and register")
+                                if debug > 0: print(f"RUN_TASK, step 3.2a: waiting for step {waiting_step}, keyword={comp.keyword!r}, to finish and register")
                                 continue
 
                         comp.check_submission_status(global_env, debug=debug)
@@ -326,6 +326,9 @@ def run_task(sys_path: str, inp_paths: list, global_env: str | object, handle_er
                             print(f"RUN_TASK, step 5.2: maximum steps reached without convergence")
                             report += f"Repetitive optimization exhausted {this_job.job_data.max_steps} steps without convergence: {comp.out_path}. Check energy, forces and QE optimization status.\n"
 
+                    if worked and this_job.job_setup == 'find_minimum':
+                        report += this_job.continue_minimum_search(comp, debug=debug)
+
                     if len(this_job.computations) > ncomputations: sys.should_save = True
 
                     ## 5.3 Keep error handling after continuation creation so superseded outputs stay intact.
@@ -395,8 +398,9 @@ def get_status(sys_folder: str, branch_name: str, debug: int=0):
         return "absent"
 
     ## Otherwise.. it looks for files with standardized names (see setup functions in scope.classes_workflow)
-    if os.path.isfile(f"{sys_folder}TERMINATED"):                return "terminated"
-    if os.path.isfile(f"{sys_folder}{branch_name}_FINISHED"):    return "finished"  
+    branch_name = branch_name.lower().replace(' ','_')
+    if os.path.isfile(os.path.join(sys_folder,'TERMINATED')) or os.path.isfile(os.path.join(sys_folder,f'{branch_name}_TERMINATED')): return "terminated"
+    if os.path.isfile(os.path.join(sys_folder,f'{branch_name}_FINISHED')): return "finished"
     return "active"
 
 ######
@@ -437,6 +441,7 @@ def verify_paths(global_env: object, sys: object, debug: int=0) -> bool:
 
 ######
 def verify_status(sys_path: str, inp_paths: list, debug: int=0) -> bool:
+    """Checks branch markers and returns True if any requested branch is active."""
 
     sys_folder = os.path.dirname(sys_path)
     if debug > 0: print(f"RUN_TASK.VERIFY_STATUS: searching status files in {sys_folder}")

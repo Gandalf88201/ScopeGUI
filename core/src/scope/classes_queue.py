@@ -1,6 +1,9 @@
+import re
 import subprocess
 import shlex
 from datetime                  import datetime, timedelta
+from math                      import ceil
+from scope.parse_general       import parse_time
 
 #############
 ### QUEUE ###
@@ -35,7 +38,7 @@ class Queue(object):
         self.name                = fix_partition_name(name)
         self.alter_name          = self.name                ## not the raw name: sinfo marks the default partition 'std*'
         self.time_limit_plain    = time_limit
-        seconds                  = _queue_time_to_seconds(time_limit, _environment.scheduler)
+        seconds                  = _read_queue_time(time_limit, _environment.scheduler)
         self.time_limit          = None if seconds is None else seconds/60
         if self.time_limit is not None and self.time_limit.is_integer(): self.time_limit = int(self.time_limit)
         self.default_time_limit  = None
@@ -102,12 +105,12 @@ class Queue(object):
                 continue
             try:
                 entries   = settings[field].split(',')
-                seconds   = _queue_time_to_seconds(entries[0].strip(), scheduler)
+                seconds   = _read_queue_time(entries[0], scheduler)
                 intervals = [seconds] if seconds is not None else []
                 overrides = {}
                 for entry in entries[1:]:
                     host, value = entry.strip().removeprefix('[').removesuffix(']').split('=',1)
-                    seconds = _queue_time_to_seconds(value, scheduler)
+                    seconds = _read_queue_time(value, scheduler)
                     overrides[host] = None if seconds is None else seconds/divisor
                     if seconds is not None: intervals.append(seconds)
                 value = min(intervals)/divisor if intervals else None
@@ -411,33 +414,50 @@ def fix_partition_name(name):
     return name
 
 
-def _queue_time_to_seconds(value: str | None, scheduler: str) -> int | None:
-    """Converts a scheduler configuration time to seconds, or None for no limit.
+def get_submission_time_limit(queue: object) -> int | float | str | None:
+    """Returns the requested wall time in minutes or the clock string from an older Queue.
 
-    Accepts SLURM's minutes, MM:SS, HH:MM:SS and day-prefixed formats. SGE
-    accepts integer seconds or HH:MM:SS, including omitted zero fields.
-    None and scheduler markers for unlimited/unset values return None.
-    Invalid times raise ValueError.
+    Uses the task's time_limit first, then the queue's finite maximum. An
+    unlimited queue uses its configured default, else the Environment's
+    fallback_time_limit (set with scope config), else 30 days. Returns None when
+    the queue limit is unknown and the task supplies none.
     """
-    if value is None: return None
-    value = str(value).strip().lower()
-    if value in ('infinity','infinite','unlimited','none','n/a','(null)'): return None
-    days = 0
-    if scheduler == 'sge' and ':' not in value:
-        base = 16 if value.startswith('0x') else 8 if value.startswith('0') and len(value) > 1 else 10
-        seconds = int(value,base)
-        if seconds < 0: raise ValueError(f'Negative queue time: {value}')
-        return seconds
-    if scheduler == 'slurm' and '-' in value:
-        day_part, value = value.split('-',1)
-        if not day_part.isdecimal(): raise ValueError(f'Invalid queue time: {value}')
-        days = int(day_part)
-        parts = value.split(':')
-        parts += ['0']*(3-len(parts))
-    else:
-        parts = value.split(':')
-        if scheduler == 'slurm' and len(parts) == 1: parts += ['0']
-    if scheduler == 'sge': parts = [part or '0' for part in parts]
-    if len(parts) not in (2,3) or (scheduler == 'sge' and len(parts) != 3) or not all(part.isdecimal() for part in parts):
-        raise ValueError(f'Invalid queue time: {value}')
-    return days*86400 + sum(int(part)*60**idx for idx,part in enumerate(reversed(parts)))
+    time_limit = getattr(queue._environment,'time_limit',None)
+    if time_limit is None:
+        time_limit           = getattr(queue,'time_limit',None)
+        raw_limit            = getattr(queue,'time_limit_plain',time_limit)
+        base, _, host_limits = str(raw_limit).partition(',')
+        # For SGE, time_limit includes the shortest finite host override to the base limit.
+        if _queue_time_marker(base) == 'unlimited' and (not host_limits or time_limit is None):
+            time_limit = getattr(queue,'default_time_limit',None) or getattr(queue._environment,'fallback_time_limit',None) or 30*24*60
+
+    # Slurm grants whole minutes, so a 90-second request is written as 00:02:00.
+    if queue._environment.scheduler == 'slurm' and isinstance(time_limit,float):
+        return ceil(time_limit)
+    return time_limit
+
+
+def _queue_time_marker(value: str | None) -> str | None:
+    """Identifies scheduler fields marked unlimited or unset. Other values are duration inputs."""
+    text = str(value).strip().lower()
+    if text in ('infinite','infinity','unlimited'): return 'unlimited'
+    if text in ('none','n/a','(null)'): return 'unset'
+    return None
+
+
+def _read_queue_time(value: str | None, scheduler: str) -> int | None:
+    """Reads a scheduler field in seconds. Unlimited or unset fields have no numeric value."""
+    if _queue_time_marker(value) is not None: return None
+    text = str(value).strip().lower()
+    if scheduler == 'slurm' and re.fullmatch(r'(?:\d+-)?\d+(?::\d+){0,2}',text):
+        return int(parse_time(text,input_unit='minutes'))
+    if scheduler == 'sge':
+        # qconf can omit zero clock fields or write integer seconds in octal or hex.
+        if ':' in text:
+            fields = [field or '0' for field in text.split(':')]
+            if len(fields) == 3 and all(field.isdecimal() for field in fields): return int(parse_time(':'.join(fields)))
+        else:
+            base = 16 if text.startswith('0x') else 8 if text.startswith('0') else 10
+            seconds = int(text,base)
+            if seconds >= 0: return seconds
+    raise ValueError(f'Invalid {scheduler} time: {value!r}')

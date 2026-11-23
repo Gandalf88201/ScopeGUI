@@ -76,46 +76,52 @@ def get_attempt_number(comp: object, origin: str, debug: int=0) -> int:
     return attempt_number
 
 
-def get_slurm_time_limit(queue: object, debug: int=0) -> int | str | None:
-    """The wall time (minutes, or a Slurm time string) to request with #SBATCH --time for a job on `queue`.
-
-    In order: the input's time_limit (&environment), the partition's MaxTime, its DefaultTime, then the
-    Environment's fallback_time_limit. A partition with MaxTime=UNLIMITED and no DefaultTime gives neither,
-    and some clusters then refuse any job without --time; fallback_time_limit covers that case. None when
-    none is known: a warning is printed and no --time is written.
-    """
-    env = queue._environment
-    for value in (getattr(env,'time_limit',None), getattr(queue,'time_limit',None),
-                  getattr(queue,'default_time_limit',None), getattr(env,'fallback_time_limit',None)):
-        if value is not None and value != 'none': return value
-    print(f"GEN_SUBFILE: WARNING: no wall time known for queue {queue.name} (its maximum is unlimited and it has no default); "
-          "the scheduler may reject the job. Set time_limit in &environment, or fallback_time_limit in the Environment.")
-    return None
+def _wall_time_seconds(minutes: int | float | str | None) -> int | None:
+    """Returns whole seconds for stored minutes or a legacy clock, rounding fractional seconds up."""
+    from scope.classes_queue import _read_queue_time
+    if minutes is None: return None
+    if isinstance(minutes,str): return _read_queue_time(minutes,'slurm')
+    if isinstance(minutes,int) or minutes.is_integer(): return int(minutes)*60
+    seconds = int(minutes*60)
+    # Compare in minutes so an exact whole second survives the conversion back from minutes.
+    if seconds/60 < minutes: seconds += 1
+    return seconds
 
 
-def get_slurm_signal_time(time_limit: int | str | None, debug: int=0) -> int:
+def get_slurm_signal_time(time_limit: int | float | str | None, debug: int=0) -> int:
     """Returns advance-warning seconds for a SLURM wall-time limit.
 
-    Uses 10% of the limit, between 10 and 60 seconds. Numeric values represent
-    minutes; formatted strings use slurm_time_to_seconds(). None or an
-    unlimited queue uses 60 seconds. SLURM may deliver its warning early.
+    Uses 10% of a finite limit, between 10 and 60 seconds. Accepts minutes or
+    a Slurm duration string. An unavailable, unlimited or zero limit uses 60 seconds.
     """
-    from scope.parse_general import slurm_time_to_seconds
-    if time_limit is None: return 60
-    if isinstance(time_limit,str) and not time_limit.isdigit():
-        if '-' in time_limit and ':' not in time_limit: time_limit += ':00:00'
-        elif '-' not in time_limit and time_limit.count(':') == 1: time_limit = '0:'+time_limit
-        seconds = slurm_time_to_seconds(time_limit)
-    else:
-        seconds = int(time_limit)*60
-    return min(60,max(10,seconds//10)) if seconds > 0 else 60
+    seconds = _wall_time_seconds(time_limit)
+    if seconds is None or seconds <= 0: return 60
+    return min(60,max(10,seconds//10))
+
+
+def gen_slurm_time_directives(queue: object) -> str:
+    """Returns Slurm's wall-time and warning directives. An unknown limit produces only the warning directive."""
+    from scope.classes_queue import get_submission_time_limit
+    time_limit = get_submission_time_limit(queue)
+    if isinstance(time_limit,str):
+        # Older Queues can store a clock with seconds. Slurm grants whole minutes.
+        seconds = _wall_time_seconds(time_limit)
+        time_limit = None if seconds is None else (seconds+59)//60
+    directives = []
+    if time_limit is not None:
+        days, remainder = divmod(time_limit,24*60)
+        hours, minutes  = divmod(remainder,60)
+        day_prefix = f'{days}-' if days else ''
+        directives.append(f'#SBATCH --time={day_prefix}{hours:02d}:{minutes:02d}:00')
+    directives.append(f'#SBATCH --signal=B:USR1@{get_slurm_signal_time(time_limit)}')
+    return '\n'.join(directives)
 
 
 def gen_sge_time_directives(queue: object, debug: int=0) -> tuple[str,str]:
     """Returns SGE wall-time directives and the signal that triggers result copying.
 
-    Uses the Environment's requested time_limit, or the Queue's maximum, in
-    minutes. Omits h_rt when neither limit is available. Older Queues collect
+    Uses the task's time_limit, the queue's finite maximum, or 30 days for an
+    unlimited queue. Omits h_rt when the hard limit is unknown. Older Queues collect
     missing settings when possible; unavailable settings use -notify/USR2.
 
     Without a finite soft limit, -notify requests USR2 before termination; USR1
@@ -125,18 +131,13 @@ def gen_sge_time_directives(queue: object, debug: int=0) -> tuple[str,str]:
     controls the grace period; zero or unavailable intervals cannot guarantee it.
     Assumes SGE's standard warning signals.
     """
-    from scope.classes_queue import _queue_time_to_seconds
+    from scope.classes_queue import get_submission_time_limit
     if hasattr(queue,'update_settings'): queue.update_settings(debug=max(debug-1,0))
 
     # 1) Converts the requested and configured wall times from minutes to seconds.
-    time_limit = getattr(queue._environment,'time_limit',None)
-    if time_limit is None: time_limit = getattr(queue,'time_limit',None)
-    soft_limit = getattr(queue,'soft_time_limit',None)
+    time_limit = _wall_time_seconds(get_submission_time_limit(queue))
+    soft_limit = _wall_time_seconds(getattr(queue,'soft_time_limit',None))
     notify     = getattr(queue,'notify_time',None)
-    if isinstance(time_limit,str): time_limit = _queue_time_to_seconds(time_limit,'slurm')
-    elif time_limit is not None:   time_limit = int(time_limit*60)
-    if isinstance(soft_limit,str): soft_limit = _queue_time_to_seconds(soft_limit,'slurm')
-    elif soft_limit is not None:   soft_limit = int(soft_limit*60)
 
     # 2) Selects the appropriate SGE warning without confusing it with suspension.
     directives = []
