@@ -573,7 +573,7 @@ def evaluate_probe(p: Profile, result: Result, local_version: str="", local_comm
                 checks.append(Check("Scheduler commands", "fail" if missing else "ok", ("missing: " + ", ".join(missing)) if missing else ", ".join(needed) + " found"))
             expected = {k: os.path.join(expand_home(p.remote_root, info.get("home", "")).rstrip("/"), v) + "/" for k, v in (("sources", "Sources"), ("systems", "Systems"), ("computations", "Computations"))}
             off = [k for k in expected if os.path.normpath(env[k]) != os.path.normpath(expected[k])]
-            checks.append(Check("Folder layout", ("fail" if "systems" in off else "warn") if off else "ok", ("The environment's " + ", ".join(off) + " folder is not <project folder>/" + "/".join(v.capitalize() for v in off) + ". `scope set_path` would use a different layout from the environment.") if off else "Sources, Systems and Computations are inside the project folder"))
+            checks.append(Check("Folder layout", ("fail" if "systems" in off else "warn") if off else "ok", ("The environment's " + ", ".join(off) + " folder is not <project folder>/" + "/".join(v.capitalize() for v in off) + f". Fix it on the cluster with: scope-project {p.remote_root} --fix {p.remote_env}   (scope-project is next to scope-gui in the SCOPE folder; a backup of the environment file is kept)") if off else "Sources, Systems and Computations are inside the project folder"))
             gone = [k for k, ok in info.get("folders", {}).items() if not ok]
             if gone: checks.append(Check("Environment folders exist", "fail", "missing: " + ", ".join(gone)))
             for light in lights_from_probe(info)[1:]: checks.append(Check(light.name, {"green": "ok", "amber": "warn", "red": "fail", "grey": "warn"}[light.state], light.detail))
@@ -1012,3 +1012,43 @@ def jobs_summary(jobs: list) -> str:
     for job in jobs: counts[job.phase] = counts.get(job.phase, 0) + 1
     order = ["running", "pending"] + sorted(k for k in counts if k not in ("running", "pending"))
     return ", ".join(f"{counts[k]} {k}" for k in order if counts.get(k))
+
+#############################
+### Project folder set-up ###
+#############################
+def project_setup_script(p: Profile, folder: str, mode: str, env_file: str, name: str="", force: bool=False, dry_run: bool=True) -> str:
+    """Bash for the cluster: runs scope_project.py (sent inside the script) with SCOPE's Python, as the scope-project command would.
+
+    Parameters:
+        folder (str):    The project folder on the cluster (~ allowed).
+        mode (str):      'from' (a new environment file for the folder, copying queues and modules from env_file), 'fix' (change env_file in place) or 'check'.
+        env_file (str):  The environment file to copy from, fix or check.
+        name (str):      Name of the new environment ('' = the folder's name).
+        force (bool):    Replace an existing file (a backup is kept), or fix although the old folders hold data.
+        dry_run (bool):  Only say what would be done.
+
+    Returns:
+        str: the script. Its output ends with one line '__SCOPE_PROJECT__{json}' (see parse_project_setup).
+    """
+    from scope.gui import scope_project
+    if mode not in ("from", "fix", "check"): raise ValueError(f"unknown mode {mode!r}")
+    with open(scope_project.__file__, encoding="utf-8") as fh: source = fh.read()
+    args = [shell_path(folder), f"--{mode}", shell_path(env_file)] + (["--name", shlex.quote(name)] if name else []) + (["--force"] if force else []) + (["--dry-run"] if dry_run else []) + ["--json"]
+    return "\n".join(["set -u", *activation_lines(p), f"SCOPE={scope_program(p)}", 'PY="$(dirname "$(command -v "$SCOPE" 2>/dev/null || echo "$SCOPE")")/python"', '[ -x "$PY" ] || PY=python3',
+                      f"\"$PY\" - {' '.join(args)} <<'SCOPE_GUI_PY'", source.rstrip(), "SCOPE_GUI_PY"]) + "\n"
+
+def parse_project_setup(stdout: str) -> dict:
+    """The outcome printed by scope_project.py with --json ({} if there is none): mode, root, target, code, changed, error, leftovers, before, after…"""
+    from scope.gui.scope_project import MARKER as PROJECT_MARKER
+    for line in reversed(stdout.splitlines()):
+        if line.startswith(PROJECT_MARKER):
+            try: return json.loads(line[len(PROJECT_MARKER):])
+            except ValueError: return {}
+    return {}
+
+def needs_project_setup(checks: list, probe: dict) -> bool:
+    """Whether the last connection test calls for Set up this folder…: SCOPE runs on the cluster, but the environment file is missing,
+    is not an environment, or its folders are not the project folder's Sources, Systems and Computations."""
+    if not probe or "scope_error" in probe: return False
+    by = {c.name: c for c in checks}
+    return (not probe.get("env_exists")) or ("env_error" in probe) or (by.get("Cluster environment file") is not None and by["Cluster environment file"].status == "fail") or (by.get("Folder layout") is not None and by["Folder layout"].status != "ok")

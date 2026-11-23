@@ -142,6 +142,10 @@ class RemoteTab(QWidget):
         ## 2 · this workspace's project on the cluster
         project, jl = card("2 · Project on the cluster  (this workspace)")
         prow = QHBoxLayout(); prow.setSpacing(12); prow.addLayout(field("Project folder on the cluster", self.root), 1); prow.addLayout(field("Cluster environment file", self.env_file), 1); jl.addLayout(prow); jl.addWidget(self.hint)
+        self.setup_btn = QPushButton("Set up this folder…"); self.setup_btn.setProperty("primary", True); self.setup_btn.hide()
+        self.setup_btn.setToolTip("Makes the project folder ready on the cluster: its Sources, Systems and Computations folders and an environment file that uses them\n(queues and modules copied from an environment that already works). It shows what it would do first; nothing changes before Apply.")
+        self.setup_note = QLabel("The last test found that this project folder is not set up for SCOPE yet (environment file missing, or its folders are elsewhere)."); self.setup_note.setWordWrap(True); self.setup_note.hide(); set_kind(self.setup_note, "warn")
+        srow = QHBoxLayout(); srow.addWidget(self.setup_note, 1); srow.addWidget(self.setup_btn); jl.addLayout(srow)
 
         ## 3 · transfer and run
         work, wl = card("3 · Transfer and run")
@@ -175,7 +179,7 @@ class RemoteTab(QWidget):
         self.terminal_btn.clicked.connect(self.show_terminal_command); self.test_btn.clicked.connect(self.test_connection)
         self.pre_up.clicked.connect(lambda: self.upload(preview=True)); self.up.clicked.connect(lambda: self.upload(preview=False)); self.run_btn.clicked.connect(self.run_remote)
         self.watch_btn.clicked.connect(self.watch_runs); self.unwatch_btn.clicked.connect(self.stop_watching); self.stopcl_btn.clicked.connect(self.stop_cluster_run)
-        self.down.clicked.connect(lambda: self.open_download())
+        self.down.clicked.connect(lambda: self.open_download()); self.setup_btn.clicked.connect(self.open_setup)
         session.systemsChanged.connect(self.refresh_systems); session.envChanged.connect(self.refresh_systems); session.inputsChanged.connect(self.update_review); theme.on_change(self.render_checks); theme.on_change(self.render_lights)
         self.reload_chooser(); self.refresh_systems(); self.update_hint(); self.render_lights(); self.update_connection_buttons()
 
@@ -227,7 +231,18 @@ class RemoteTab(QWidget):
         return self.root.text().strip(), self.env_file.text().strip()
 
     def project_edited(self) -> None:
+        self.show_setup(False)                                              ## the last test was about the old folder
         if not self.loading_project: self.projectChanged.emit()
+
+    def show_setup(self, on: bool) -> None:
+        self.setup_btn.setVisible(on); self.setup_note.setVisible(on)
+
+    def open_setup(self) -> None:
+        """Set up this folder…: a preview of what the cluster would do, then Apply (see project_setup_view)."""
+        p = self.valid_profile()
+        if not p: return
+        from scope.gui.project_setup_view import ProjectSetupDialog
+        ProjectSetupDialog(self, p, self.probe).exec()
 
     def new_profile(self) -> None:
         self.chooser.blockSignals(True); self.chooser.setCurrentIndex(-1); self.chooser.blockSignals(False); self.choose("")
@@ -386,9 +401,10 @@ class RemoteTab(QWidget):
         self.checks = checks; self.render_checks(); self.details_btn.setVisible(bool(checks))
         self.details_btn.setChecked(any(c.status != "ok" for c in checks))       ## open when something needs a look
         failed = [c for c in checks if c.status == "fail"]; warned = [c for c in checks if c.status == "warn"]
-        self.session.mark("cluster", not failed and bool(checks))
+        self.session.mark("cluster", not failed and bool(checks)); self.show_setup(remote.needs_project_setup(checks, self.probe))
         if not failed and checks: self.announce_runs()
-        self.status.setText("Connection test passed." + (f" {len(warned)} warning(s)." if warned else "") if not failed else f"Connection test failed: {len(failed)} problem(s). Fix them and test again.")
+        self.status.setText(("Connection test passed." + (f" {len(warned)} warning(s)." if warned else "") if not failed else f"Connection test failed: {len(failed)} problem(s). Fix them and test again.")
+                            + (" Set up this folder… (card 2) can fix the project folder." if self.setup_btn.isVisibleTo(self) else ""))
         self.refresh_connection()
 
     def render_checks(self) -> None:
